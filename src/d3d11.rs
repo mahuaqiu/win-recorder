@@ -267,8 +267,9 @@ impl D3D11TextureManager {
             // 按 left 坐标排序
             let mut desc_list: Vec<DXGI_OUTPUT_DESC> = outputs
                 .iter()
-                .map(|o| o.GetDesc().unwrap_or_default())
-                .collect();
+                .map(|o| o.GetDesc())
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| RecorderError::D3D11Error(format!("获取显示器描述失败: {}", e)))?;
             desc_list.sort_by_key(|d| d.DesktopCoordinates.left);
 
             match monitor {
