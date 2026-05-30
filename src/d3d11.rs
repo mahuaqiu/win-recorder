@@ -222,23 +222,29 @@ impl D3D11TextureManager {
         }
     }
 
-    /// 检测主显示器
+    /// 检测显示器尺寸
+    ///
+    /// # 参数
+    /// - `monitor`: 显示器选择（1=主屏幕 left=0，2=副屏幕）
     ///
     /// # 返回
-    /// 返回主显示器的索引和描述信息
+    /// 返回显示器尺寸 (width, height)
     ///
-    /// # 说明
-    /// 主显示器定义：left=0 的显示器
-    pub fn detect_monitor() -> Result<(u32, String), RecorderError> {
-        unsafe {
-            let mut monitor_index = 0u32;
-            let mut primary_monitor = None;
+    /// # 错误
+    /// - `MonitorNotFound`: 指定显示器不存在
+    /// - `InvalidParam`: monitor 参数无效（必须为 1 或 2）
+    pub fn detect_monitor(monitor: u32) -> Result<(u32, u32), RecorderError> {
+        if monitor != 1 && monitor != 2 {
+            return Err(RecorderError::InvalidParam("monitor must be 1 or 2".into()));
+        }
 
+        unsafe {
             // 创建 DXGI 工厂
             let factory: IDXGIFactory1 = CreateDXGIFactory1()
                 .map_err(|e| RecorderError::D3D11Error(format!("创建 DXGI 工厂失败: {}", e)))?;
 
-            // 枚举适配器
+            // 收集所有显示器
+            let mut outputs: Vec<IDXGIOutput> = Vec::new();
             let mut adapter_index = 0u32;
             loop {
                 let adapter = match factory.EnumAdapters1(adapter_index) {
@@ -246,45 +252,46 @@ impl D3D11TextureManager {
                     Err(_) => break,
                 };
 
-                // 枚举显示器输出
                 let mut output_index = 0u32;
                 loop {
                     let output = match adapter.EnumOutputs(output_index) {
                         Ok(o) => o,
                         Err(_) => break,
                     };
-
-                    // 获取输出描述
-                    let desc = output
-                        .GetDesc()
-                        .map_err(|e| {
-                            RecorderError::D3D11Error(format!("获取显示器描述失败: {}", e))
-                        })?;
-
-                    // 检查是否为主显示器（left=0）
-                    let is_primary = desc.DesktopCoordinates.left == 0;
-
-                    let monitor_name = String::from_utf16_lossy(
-                        &desc.DeviceName[..desc.DeviceName.iter().position(|&c| c == 0).unwrap_or(32)],
-                    );
-
-                    if is_primary {
-                        primary_monitor = Some((monitor_index, monitor_name));
-                        break;
-                    }
-
-                    monitor_index += 1;
+                    outputs.push(output);
                     output_index += 1;
                 }
-
-                if primary_monitor.is_some() {
-                    break;
-                }
-
                 adapter_index += 1;
             }
 
-            primary_monitor.ok_or_else(|| RecorderError::MonitorNotFound { monitor: 0 })
+            // 按 left 坐标排序
+            let mut desc_list: Vec<DXGI_OUTPUT_DESC> = outputs
+                .iter()
+                .map(|o| o.GetDesc().unwrap_or_default())
+                .collect();
+            desc_list.sort_by_key(|d| d.DesktopCoordinates.left);
+
+            match monitor {
+                1 => {
+                    // 主屏幕：left=0 的显示器
+                    let primary = desc_list
+                        .iter()
+                        .find(|d| d.DesktopCoordinates.left == 0)
+                        .ok_or(RecorderError::MonitorNotFound { monitor })?;
+                    let rect = primary.DesktopCoordinates;
+                    Ok(((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32))
+                }
+                2 => {
+                    // 副屏幕：另一个显示器
+                    let secondary = desc_list
+                        .iter()
+                        .find(|d| d.DesktopCoordinates.left != 0)
+                        .ok_or(RecorderError::MonitorNotFound { monitor })?;
+                    let rect = secondary.DesktopCoordinates;
+                    Ok(((rect.right - rect.left) as u32, (rect.bottom - rect.top) as u32))
+                }
+                _ => Err(RecorderError::InvalidParam("monitor must be 1 or 2".into())),
+            }
         }
     }
 
