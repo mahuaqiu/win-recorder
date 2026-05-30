@@ -1,3 +1,5 @@
+mod error;
+
 use pyo3::prelude::*;
 
 /// win-recorder: Windows 硬编录屏库
