@@ -65,7 +65,7 @@ impl D3D11TextureManager {
                 RecorderError::D3D11Error("创建 D3D11 上下文返回空指针".to_string())
             })?;
 
-            // 创建 Staging 纹理（CPU 可写）
+            // 创建 Staging 纹理（CPU 可读写）
             let staging_desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
                 Height: height,
@@ -78,7 +78,8 @@ impl D3D11TextureManager {
                 },
                 Usage: D3D11_USAGE_STAGING,
                 BindFlags: 0, // Staging 纹理不需要绑定到渲染管线
-                CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+                // 设置读写权限，以便后续从纹理读取数据
+                CPUAccessFlags: (D3D11_CPU_ACCESS_WRITE.0 | D3D11_CPU_ACCESS_READ.0) as u32,
                 MiscFlags: 0,
             };
 
@@ -105,7 +106,9 @@ impl D3D11TextureManager {
                     Quality: 0,
                 },
                 Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_VIDEO_ENCODER.0 as u32, // 绑定到视频编码器
+                // 使用 SHADER_RESOURCE 作为通用绑定标志，兼容性更好
+                // 如果需要视频编码，可以尝试 VIDEO_ENCODER，但可能需要特定硬件支持
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
                 CPUAccessFlags: 0,
                 MiscFlags: D3D11_RESOURCE_MISC_SHARED.0 as u32,
             };
@@ -189,29 +192,79 @@ impl D3D11TextureManager {
         }
     }
 
-    /// 创建 Media Foundation Sample
+    /// 创建 Media Foundation Sample（使用内存缓冲区）
     ///
     /// # 返回
-    /// 返回包含 GPU 纹理的 IMFSample
+    /// 返回包含帧数据的 IMFSample
     ///
     /// # 说明
     /// 用于传递给 MF SinkWriter 进行编码
+    /// 注意：此方法直接从已上传的帧数据创建缓冲区
+    /// 由于数据已经在 Staging 纹理中，我们需要重新映射以读取
     pub fn create_mf_sample(&self) -> Result<IMFSample, RecorderError> {
         unsafe {
             // 创建 Sample
             let sample = MFCreateSample()
                 .map_err(|e| RecorderError::MFError(format!("创建 IMFSample 失败: {}", e)))?;
 
-            // 创建 Media Buffer
-            let buffer = MFCreateDXGISurfaceBuffer(
-                ptr::null(), // GUID，使用 null 表示自动选择
-                &self.gpu_texture,
-                0, // 子资源索引
-                false,
-            )
-            .map_err(|e| {
-                RecorderError::MFError(format!("创建 DXGI Surface Buffer 失败: {}", e))
-            })?;
+            // 计算缓冲区大小
+            let buffer_size = (self.width * self.height * 4) as u32;
+
+            // 创建内存缓冲区
+            let buffer = MFCreateMemoryBuffer(buffer_size)
+                .map_err(|e| RecorderError::MFError(format!("创建 Memory Buffer 失败: {}", e)))?;
+
+            // 锁定缓冲区以写入数据
+            let mut data_ptr: *mut u8 = ptr::null_mut();
+            let mut max_length = 0u32;
+            let mut current_length = 0u32;
+            buffer
+                .Lock(&mut data_ptr, Some(&mut max_length), Some(&mut current_length))
+                .map_err(|e| RecorderError::MFError(format!("锁定缓冲区失败: {}", e)))?;
+
+            // 映射 GPU 纹理以读取数据（使用 MAP_READ）
+            // 注意：GPU 纹理是 DEFAULT usage，不能直接映射
+            // 我们需要使用 Staging 纹理来读取数据
+            let mut mapped_resource = D3D11_MAPPED_SUBRESOURCE::default();
+
+            // 先将 GPU 纹理拷贝回 Staging 纹理
+            self.context.CopyResource(&self.staging_texture, &self.gpu_texture);
+
+            self.context
+                .Map(
+                    &self.staging_texture,
+                    0,
+                    D3D11_MAP_READ,
+                    0,
+                    Some(&mut mapped_resource),
+                )
+                .map_err(|e| RecorderError::MFError(format!("映射 Staging 纹理失败: {}", e)))?;
+
+            // 从 Staging 纹理拷贝数据到缓冲区
+            let src_pitch = (self.width * 4) as usize;
+            let dst_pitch = (self.width * 4) as usize;
+            for row in 0..self.height as usize {
+                let src_offset = row * src_pitch;
+                let dst_offset = row * dst_pitch;
+                ptr::copy_nonoverlapping(
+                    mapped_resource.pData.add(src_offset) as *const u8,
+                    data_ptr.add(dst_offset),
+                    src_pitch,
+                );
+            }
+
+            // 解除映射
+            self.context.Unmap(&self.staging_texture, 0);
+
+            // 设置当前长度
+            buffer
+                .SetCurrentLength(buffer_size)
+                .map_err(|e| RecorderError::MFError(format!("设置缓冲区长度失败: {}", e)))?;
+
+            // 解锁缓冲区
+            buffer
+                .Unlock()
+                .map_err(|e| RecorderError::MFError(format!("解锁缓冲区失败: {}", e)))?;
 
             // 添加 Buffer 到 Sample
             sample
