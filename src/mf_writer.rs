@@ -147,6 +147,18 @@ impl MFSinkWriter {
                 .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)
                 .map_err(|e| RecorderError::MFError(format!("设置输入像素宽高比失败: {}", e)))?;
 
+            // 设置所有样本独立（未压缩格式必须）
+            input_type
+                .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
+                .map_err(|e| RecorderError::MFError(format!("设置样本独立属性失败: {}", e)))?;
+
+            // 设置默认 stride（BGRA = width * 4，正数表示从上到下）
+            // stride 以 32 位有符号整数形式存储在 UINT32 中
+            let stride = (aligned_width * 4) as i32 as u32;
+            input_type
+                .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
+                .map_err(|e| RecorderError::MFError(format!("设置默认 stride 失败: {}", e)))?;
+
             // 设置输入类型（NULL 表示使用默认编码器）
             sink_writer
                 .SetInputMediaType(stream_index, &input_type, None)
