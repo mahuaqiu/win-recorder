@@ -55,16 +55,17 @@ impl WinRecorder {
     ///
     /// # 说明
     /// 初始化 D3D11 设备和 Media Foundation SinkWriter
+    /// 分辨率会自动对齐到 16 倍数（H264 编码器要求）
     pub fn start(&mut self) -> Result<(), RecorderError> {
         if self.recording {
             return Err(RecorderError::AlreadyRecording);
         }
 
-        // 创建 D3D11 纹理管理器
-        let texture_manager = D3D11TextureManager::new(self.width, self.height)?;
-        let device = texture_manager.device().clone();
+        // 先创建 SinkWriter（内部会对齐分辨率）
+        // 使用临时设备
+        let temp_texture_manager = D3D11TextureManager::new(self.width, self.height)?;
+        let device = temp_texture_manager.device().clone();
 
-        // 创建 SinkWriter
         let mut sink_writer = MFSinkWriter::new(
             &self.output_path,
             &device,
@@ -73,7 +74,19 @@ impl WinRecorder {
             self.fps,
             self.audio,
         )?;
+
+        // 获取对齐后的分辨率
+        let aligned_width = sink_writer.width();
+        let aligned_height = sink_writer.height();
+
+        // 使用对齐后的分辨率创建纹理管理器
+        let texture_manager = D3D11TextureManager::new(aligned_width, aligned_height)?;
+
         sink_writer.begin_writing()?;
+
+        // 更新内部尺寸为对齐后的尺寸
+        self.width = aligned_width;
+        self.height = aligned_height;
 
         self.texture_manager = Some(Arc::new(texture_manager));
         self.sink_writer = Some(Arc::new(Mutex::new(sink_writer)));
