@@ -3,6 +3,7 @@
 //! 用于实时推流场景，输出编码后的 NAL 单元而不是写入文件
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 use crate::d3d11::D3D11TextureManager;
 use crate::error::RecorderError;
 use crate::mf_writer::MFSinkWriter;
@@ -110,13 +111,13 @@ impl StreamingEncoder {
 
         // 使用 Python 字典返回信息
         let info = pyo3::Python::with_gil(|py| {
-            let dict: Py<PyDict> = PyDict::new_bound(py).into();
+            let dict = PyDict::new_bound(py);
             dict.set_item("width", self.width)?;
             dict.set_item("height", self.height)?;
             dict.set_item("fps", self.fps)?;
             dict.set_item("sps", sps)?;
             dict.set_item("pps", pps)?;
-            Ok::<_, pyo3::PyErr>(dict)
+            Ok::<_, pyo3::PyErr>(dict.into())
         })?;
 
         Ok(info)

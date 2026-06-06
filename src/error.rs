@@ -1,4 +1,5 @@
 use thiserror::Error;
+use pyo3::PyErr;
 
 /// win-recorder 错误类型
 #[derive(Error, Debug)]
@@ -45,5 +46,12 @@ impl From<RecorderError> for pyo3::PyErr {
             }
             _ => PyRuntimeError::new_err(err.to_string()),
         }
+    }
+}
+
+/// 将 Python 异常转换为 RecorderError
+impl From<pyo3::PyErr> for RecorderError {
+    fn from(err: pyo3::PyErr) -> Self {
+        RecorderError::RecordingFailed(err.to_string())
     }
 }
