@@ -17,6 +17,7 @@ pub struct WinRecorder {
     output_path: String,
     fps: u32,
     audio: bool,
+    #[allow(dead_code)]
     monitor: u32,
     width: u32,
     height: u32,
