@@ -6,6 +6,7 @@ use pyo3::prelude::*;
 use crate::d3d11::D3D11TextureManager;
 use crate::error::RecorderError;
 use crate::mf_writer::MFSinkWriter;
+use parking_lot::Mutex;
 use std::sync::Arc;
 use windows::Win32::Media::MediaFoundation::*;
 
@@ -60,7 +61,7 @@ impl StreamingEncoder {
     /// 启动编码器
     ///
     /// 返回编码器信息，包括 SPS/PPS 数据
-    pub fn start(&mut self) -> Result<Py<PyDict>, RecorderError> {
+    pub fn start(&mut self) -> Result<Bound<'_, PyDict>, RecorderError> {
         if self.encoding {
             return Err(RecorderError::AlreadyRecording);
         }
@@ -115,7 +116,7 @@ impl StreamingEncoder {
             dict.set_item("fps", self.fps)?;
             dict.set_item("sps", sps)?;
             dict.set_item("pps", pps)?;
-            Ok::<_, pyo3::PyErr>(dict.into())
+            Ok::<_, pyo3::PyErr>(dict)
         })?;
 
         Ok(info)
