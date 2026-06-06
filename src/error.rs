@@ -1,5 +1,4 @@
 use thiserror::Error;
-use pyo3::PyErr;
 
 /// win-recorder 错误类型
 #[derive(Error, Debug)]

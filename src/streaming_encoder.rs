@@ -20,9 +20,12 @@ pub struct StreamingEncoder {
     texture_manager: Option<Arc<D3D11TextureManager>>,
     /// 编码器
     sink_writer: Option<Arc<Mutex<MFSinkWriter>>>,
-    /// 编码器配置
+    /// 编码配置
+    #[allow(dead_code)]
     fps: u32,
+    #[allow(dead_code)]
     bitrate: u32,
+    #[allow(dead_code)]
     monitor: u32,
     width: u32,
     height: u32,
@@ -195,25 +198,36 @@ impl StreamingEncoder {
 
     /// 获取视频宽度
     #[getter]
+    #[allow(dead_code)]
     pub fn width(&self) -> u32 {
         self.width
     }
 
     /// 获取视频高度
     #[getter]
+    #[allow(dead_code)]
     pub fn height(&self) -> u32 {
         self.height
     }
 
     /// 获取帧率
     #[getter]
+    #[allow(dead_code)]
     pub fn fps(&self) -> u32 {
         self.fps
     }
 
     /// 获取是否正在编码
     #[getter]
+    #[allow(dead_code)]
     pub fn is_encoding(&self) -> bool {
         self.encoding
+    }
+
+    /// 获取显示器索引
+    #[getter]
+    #[allow(dead_code)]
+    pub fn monitor(&self) -> u32 {
+        self.monitor
     }
 }
