@@ -350,11 +350,13 @@ impl D3D11TextureManager {
     }
 
     /// 获取纹理宽度
+    #[allow(dead_code)]
     pub fn width(&self) -> u32 {
         self.width
     }
 
     /// 获取纹理高度
+    #[allow(dead_code)]
     pub fn height(&self) -> u32 {
         self.height
     }
@@ -365,6 +367,7 @@ impl D3D11TextureManager {
     }
 
     /// 获取 GPU 纹理
+    #[allow(dead_code)]
     pub fn gpu_texture(&self) -> &ID3D11Texture2D {
         &self.gpu_texture
     }
