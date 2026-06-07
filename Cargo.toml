@@ -10,9 +10,11 @@ crate-type = ["cdylib"]
 [dependencies]
 pyo3 = { version = "0.22", features = ["extension-module"] }
 windows = { version = "0.58", features = [
+    "Win32",
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
     "Win32_Media_Audio",
+    "Win32_Graphics",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D",
     "Win32_Graphics_Dxgi",
@@ -21,7 +23,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_SystemServices",
-]}
+] }
 anyhow = "1.0"
 thiserror = "1.0"
 parking_lot = "0.12"
