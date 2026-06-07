@@ -5,8 +5,6 @@
 
 use std::sync::Arc;
 use parking_lot::Mutex;
-use windows::core::*;
-use windows::Win32::Media::MediaFoundation::*;
 
 /// 内存字节流
 ///
@@ -43,7 +41,7 @@ impl MemoryByteStream {
     }
 
     /// 清空缓冲区
-    pub fn clear(&self) {
+    pub fn clear(&mut self) {
         let mut buffer = self.buffer.lock();
         buffer.clear();
         self.position = 0;
@@ -102,6 +100,7 @@ impl Default for MFByteStream {
 // 然后从内存缓冲区读取编码数据
 
 /// 从内存缓冲区提取 NAL 单元
+#[allow(dead_code)]
 pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
     let mut nal_units = Vec::new();
 
@@ -152,6 +151,7 @@ pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
 }
 
 /// 检测 NAL 单元类型
+#[allow(dead_code)]
 pub fn get_nal_type(data: &[u8]) -> Option<u8> {
     if data.is_empty() {
         return None;
@@ -176,6 +176,7 @@ pub fn get_nal_type(data: &[u8]) -> Option<u8> {
 }
 
 /// 判断是否为关键帧 (IDR)
+#[allow(dead_code)]
 pub fn is_key_frame(data: &[u8]) -> bool {
     if let Some(nal_type) = get_nal_type(data) {
         // IDR 帧的 NAL 类型为 5

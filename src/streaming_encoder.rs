@@ -8,11 +8,8 @@ use pyo3::types::PyDict;
 use crate::d3d11::D3D11TextureManager;
 use crate::error::RecorderError;
 use crate::mf_writer::MFSinkWriter;
-use crate::memory_byte_stream::{extract_nal_units, is_key_frame};
 use parking_lot::Mutex;
 use std::sync::Arc;
-use std::thread;
-use std::sync::mpsc::{self, Sender, Receiver};
 use windows::Win32::Media::MediaFoundation::*;
 
 /// 流式编码器
