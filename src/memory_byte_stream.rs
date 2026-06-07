@@ -10,12 +10,14 @@ use parking_lot::Mutex;
 ///
 /// 实现 IMFByteStream 接口，将数据写入内存缓冲区
 /// 供 MFSinkWriter 使用以实现内存输出
+#[allow(dead_code)]
 pub struct MemoryByteStream {
     buffer: Arc<Mutex<Vec<u8>>>,
     position: u64,
     is_valid: bool,
 }
 
+#[allow(dead_code)]
 impl MemoryByteStream {
     /// 创建新的内存字节流
     pub fn new() -> Self {
@@ -65,6 +67,7 @@ impl Default for MemoryByteStream {
 }
 
 /// 内存字节流 COM 对象
+#[allow(dead_code)]
 #[repr(C)]
 pub struct MFByteStream {
     // vtable 指针由 Windows COM 机制管理
@@ -74,6 +77,7 @@ pub struct MFByteStream {
     is_valid: bool,
 }
 
+#[allow(dead_code)]
 impl MFByteStream {
     pub fn new() -> Self {
         Self {
