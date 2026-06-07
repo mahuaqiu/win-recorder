@@ -1,5 +1,6 @@
 mod d3d11;
 mod error;
+mod memory_byte_stream;
 mod mf_writer;
 mod recorder;
 mod streaming_encoder;
