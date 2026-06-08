@@ -85,6 +85,16 @@ impl MemoryByteStream {
         let inner = self.inner.lock();
         inner.is_valid
     }
+
+    /// 获取 COM 接口指针 (IMFByteStream)
+    ///
+    /// 使用 windows-implement 宏创建的对象会自动实现 ComInterface trait，
+    /// 可以通过 .cast() 方法转换为对应的 COM 接口类型
+    #[cfg(windows)]
+    pub fn as_raw(&self) -> windows::Win32::Media::MediaFoundation::IMFByteStream {
+        use windows::core::ComInterface;
+        self.cast().expect("MemoryByteStream 应该能转换为 IMFByteStream")
+    }
 }
 
 impl Default for MemoryByteStream {
