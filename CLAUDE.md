@@ -54,6 +54,15 @@ Python (BGRA bytearray)
 - **显示器编号**：monitor=1 为主显示器（left=0），monitor=2 为副显示器
 - **音频未实现**：`audio` 参数存在但返回 `InvalidParam` 错误，WASAPI 音频捕获计划在 v0.2.0
 
+## 版本号同步
+
+**重要**：每次发布新版本时，需要同时更新以下位置：
+
+| 文件 | 字段 |
+|------|------|
+| `Cargo.toml` | `version` |
+| `pyproject.toml` | `[project].version` |
+
 ### 已知问题
 
 - README 中的架构图描述了 `MFCreateDXGISurfaceBuffer`（零拷贝 GPU 路径），但实际代码使用 `MFCreateMemoryBuffer`（经 CPU 回读），存在额外拷贝开销
