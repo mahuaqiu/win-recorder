@@ -1030,23 +1030,29 @@ impl H264Encoder {
 /// Python 绑定方法
 #[pymethods]
 impl H264Encoder {
-    /// 创建 H264 编码器
+    /// 创建 H264 编码器（使用显示器编号）
     ///
     /// # 参数
-    /// - width: 视频宽度
-    /// - height: 视频高度
     /// - fps: 帧率（默认 10）
     /// - bitrate: 码率（默认 2000000 bps）
+    /// - monitor: 显示器编号（1=主显示器，2=副显示器）
     /// - profile: H264 Profile（66=Baseline, 77=Main, 100=High，默认 66）
+    ///
+    /// 此构造函数自动检测显示器分辨率
     #[new]
-    #[pyo3(signature = (width, height, fps=10, bitrate=2000000, profile=66))]
+    #[pyo3(signature = (fps=10, bitrate=2000000, monitor=1, profile=66))]
     pub fn new(
-        width: u32,
-        height: u32,
         fps: u32,
         bitrate: u32,
+        monitor: u32,
         profile: u32,
     ) -> Result<Self, RecorderError> {
+        use crate::d3d11::D3D11TextureManager;
+
+        // 检测显示器尺寸
+        let (width, height) = D3D11TextureManager::detect_monitor(monitor)?;
+        println!("[H264Encoder] Detected monitor {}: {}x{}", monitor, width, height);
+
         let params = H264EncodeParams {
             width,
             height,
@@ -1077,33 +1083,37 @@ impl H264Encoder {
         })?)
     }
 
-    /// 编码单帧
+    /// 编码单帧（推流专用版本）
     ///
     /// # 参数
     /// - frame_data: BGRA 格式的帧数据
     ///
     /// # 返回
-    /// 返回编码后的数据列表，每个元素是 (frame_type, data) 元组
-    /// frame_type: "IDR" | "SPS" | "PPS" | "PFrame" | "Unknown"
-    /// data: 编码后的字节数据（Annex-B 格式）
-    pub fn encode_frame(&mut self, frame_data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, RecorderError> {
+    /// 返回编码后的数据，带帧类型前缀：
+    /// - 0x01 = SPS/PPS
+    /// - 0x02 = IDR (关键帧)
+    /// - 0x03 = P (预测帧)
+    /// 格式: [1字节帧类型][Annex-B NAL 数据]
+    pub fn encode_frame(&mut self, frame_data: &[u8]) -> Result<Option<Vec<u8>>, RecorderError> {
         let frames = self.encode_frame_data(frame_data)?;
 
-        let result: Vec<(String, Vec<u8>)> = frames
-            .into_iter()
-            .map(|f| {
-                let type_str = match f.frame_type {
-                    FrameType::IDR => "IDR",
-                    FrameType::SPS => "SPS",
-                    FrameType::PPS => "PPS",
-                    FrameType::PFrame => "PFrame",
-                    FrameType::Unknown => "Unknown",
-                };
-                (type_str.to_string(), f.data)
-            })
-            .collect();
+        if frames.is_empty() {
+            return Ok(None);
+        }
 
-        Ok(result)
+        let mut result = Vec::new();
+        for frame in frames {
+            // 根据帧类型添加前缀
+            let prefix = match frame.frame_type {
+                FrameType::SPS | FrameType::PPS => 0x01,
+                FrameType::IDR => 0x02,
+                FrameType::PFrame | FrameType::Unknown => 0x03,
+            };
+            result.push(prefix);
+            result.extend_from_slice(&frame.data);
+        }
+
+        Ok(Some(result))
     }
 
     /// 停止编码器
