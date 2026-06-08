@@ -150,7 +150,7 @@ impl MemoryByteStream {
     /// 从当前 position 读取最多 cb 字节的数据
     fn Read(&self, pb: *mut u8, cb: u32, pcbread: *mut u32) -> Result<()> {
         if pb.is_null() || pcbread.is_null() {
-            return Ok(());
+            return Err(E_POINTER.into());
         }
 
         let mut inner = self.inner.lock();
@@ -185,7 +185,7 @@ impl MemoryByteStream {
     /// 从当前位置写入数据
     fn Write(&self, pb: *const u8, cb: u32) -> Result<u32> {
         if pb.is_null() {
-            return Ok(0);
+            return Err(E_POINTER.into());
         }
 
         let mut inner = self.inner.lock();
@@ -275,39 +275,6 @@ impl MemoryByteStream {
 
     fn EndWrite(&self, _presult: Option<&IMFAsyncResult>) -> Result<u32> {
         Err(E_NOTIMPL.into())
-    }
-}
-
-/// 内存字节流 COM 对象（旧名称，保持向后兼容）
-#[allow(dead_code)]
-#[repr(C)]
-pub struct MFByteStream {
-    // vtable 指针由 Windows COM 机制管理
-    buffer: Arc<Mutex<Vec<u8>>>,
-    position: u64,
-    length: u64,
-    is_valid: bool,
-}
-
-#[allow(dead_code)]
-impl MFByteStream {
-    pub fn new() -> Self {
-        Self {
-            buffer: Arc::new(Mutex::new(Vec::new())),
-            position: 0,
-            length: 0,
-            is_valid: true,
-        }
-    }
-
-    pub fn buffer(&self) -> Arc<Mutex<Vec<u8>>> {
-        self.buffer.clone()
-    }
-}
-
-impl Default for MFByteStream {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

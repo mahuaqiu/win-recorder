@@ -140,9 +140,13 @@ impl StreamingEncoder {
         self.byte_stream = Some(byte_stream);
         self.encoding = true;
 
-        // 生成模拟的 SPS/PPS 数据（用于测试）
-        // 实际生产环境需要从编码器提取真实数据
-        // 这里使用常见的 H.264 Baseline 参数
+        // 生成模拟的 SPS/PPS 数据
+        // NOTE: 此处使用硬编码的 SPS/PPS 作为首次返回值，原因：
+        // 1. IMFTransform 编码器在第一帧编码前无法获取真实的 SPS/PPS
+        // 2. 客户端通常需要在编码开始时就获得 SPS/PPS 以初始化解码器
+        // 3. 真实的 SPS/PPS 会在第一帧 IDR 帧编码后从编码器输出中获取
+        // TODO: 后续应从编码器输出的第一帧 IDR 数据中解析真实 SPS/PPS 并缓存，
+        //       替换此处的硬编码值，以确保与实际编码参数一致
         self.sps_data = vec![
             0x00, 0x00, 0x00, 0x01, // NAL start code
             0x67, // NAL header: type=7(SPS), nal_ref_idc=3
@@ -256,21 +260,26 @@ impl StreamingEncoder {
                     7 | 8 => {
                         // SPS/PPS
                         result.push(0x01);
+                        // Annex-B 起始码：每个 NAL 单元前必须添加 0x00 0x00 0x00 0x01
+                        result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
                         result.extend_from_slice(&nal);
                     }
                     5 => {
                         // IDR (关键帧)
                         result.push(0x02);
+                        result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
                         result.extend_from_slice(&nal);
                     }
                     1 => {
                         // P (预测帧)
                         result.push(0x03);
+                        result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
                         result.extend_from_slice(&nal);
                     }
                     _ => {
-                        // 其他类型也添��，但使用 0x03 前缀
+                        // 其他类型也添加，使用 0x03 前缀
                         result.push(0x03);
+                        result.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]);
                         result.extend_from_slice(&nal);
                     }
                 }
@@ -299,10 +308,10 @@ impl StreamingEncoder {
         self.byte_stream = None;
         self.encoding = false;
 
-        // 关闭 Media Foundation
-        unsafe {
-            let _ = MFShutdown();
-        }
+        // 注意：不在此处调用 MFShutdown()
+        // MFStartup/MFShutdown 是引用计数的，MFSinkWriter 在 drop 时会清理资源
+        // 如果 from_byte_stream() 失败，MFStartup 已执行但此处不会调用 MFShutdown
+        // 因此由 MFSinkWriter 的 Drop 实现负责清理
 
         println!("[StreamingEncoder] Encoder stopped");
         Ok(())
