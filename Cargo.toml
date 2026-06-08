@@ -30,3 +30,6 @@ parking_lot = "0.12"
 
 [build-dependencies]
 pyo3-build-config = "0.22"
+
+[target.'cfg(windows)'.dependencies]
+windows-implement = "0.58"
