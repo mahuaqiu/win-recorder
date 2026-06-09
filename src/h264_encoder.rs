@@ -624,7 +624,6 @@ impl H264Encoder {
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
             .map_err(|e| {
                 RecorderError::MFError(format!("H264 编码器 BEGIN_STREAMING 失败: {}", e))
-            }
             })?;
 
         println!("[H264Encoder] 流控制消息已发送");
