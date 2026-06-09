@@ -13,9 +13,11 @@
 //! H264 编码器 MFT 通常不接受 RGB32 输入，只接受 NV12 或 YUV420 格式。
 //! 因此需要在 RGB32 和 H264 编码器之间插入颜色转换 MFT。
 
-use crate::bgra_to_nv12::bgra_to_nv12;
+use crate::bgra_to_nv12::{bgra_to_nv12, bgra_to_iyuv};
 use crate::error::RecorderError;
 use crate::memory_byte_stream::{extract_nal_units, get_nal_type};
+use windows::Win32::Graphics::Direct3D11::*;
+use windows::Win32::Graphics::Dxgi::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::mem::ManuallyDrop;
@@ -123,8 +125,6 @@ pub struct H264Encoder {
     encoder_input_id: u32,
     /// 输出流 ID（H264 编码器）
     encoder_output_id: u32,
-    /// D3D11 设备（用于硬件加速编码）
-    d3d11_device: Option<ID3D11Device>,
     /// DXGI Device Manager reset token (保留字段)
     dxgi_reset_token: u32,
     /// 是否使用 CPU 模式（当 D3D11 硬件加速不可用时）
@@ -175,7 +175,6 @@ impl H264Encoder {
             pps: Vec::new(),
             encoder_input_id: 0,
             encoder_output_id: 0,
-            d3d11_device: None,
             dxgi_reset_token: 0,
             use_cpu_mode: false,
         })
@@ -420,19 +419,6 @@ impl H264Encoder {
             .h264_encoder
             .as_ref()
             .ok_or_else(|| RecorderError::MFError("H264 编码器未创建".into()))?;
-
-        // 步骤 1: 创建 D3D11 设备（用于硬件加速）
-        self.create_d3d11_device()?;
-        
-        // 步骤 2: 获取 DXGI Device Manager
-        // 注意：这里简化处理，实际需要使用 MFCreateDXGIDeviceManager
-        // 如果 DXGI 管理器创建失败，我们仍可以继续使用 CPU 转换模式
-        
-        // 步骤 3: 注册 D3D11 设备到编码器（关键步骤）
-        // 如果失败，记录警告但继续（因为我们还可以用 CPU 模式）
-        if let Err(e) = self.register_d3d11_device(h264_encoder) {
-            println!("[H264Encoder] 警告: D3D11 设备注册���败: {}，将使用 CPU 模式", e);
-        }
 
         // 获取流 ID
         self.encoder_input_id = self.get_input_stream_id(h264_encoder)?;
@@ -782,6 +768,61 @@ impl H264Encoder {
         sample
             .SetUINT32(&MF_MT_DEFAULT_STRIDE, width)
             .ok(); // stride 设置失败不是致命错误
+
+        Ok(sample)
+    }
+
+    /// 创建 IYUV 格式的 IMFSample（CPU 回退模式）
+    unsafe fn create_iyuv_sample(&self, iyuv_data: &[u8]) -> Result<IMFSample, RecorderError> {
+        let sample = MFCreateSample()
+            .map_err(|e| RecorderError::MFError(format!("创建 IMFSample 失败: {}", e)))?;
+
+        // 设置时间戳
+        let timestamp = self.frame_count as i64 * self.frame_duration;
+        sample
+            .SetSampleTime(timestamp)
+            .map_err(|e| RecorderError::MFError(format!("设置样本时间失败: {}", e)))?;
+
+        sample
+            .SetSampleDuration(self.frame_duration)
+            .map_err(|e| RecorderError::MFError(format!("设置样本持续时间失败: {}", e)))?;
+
+        // 创建内存缓冲区
+        let buffer_size = iyuv_data.len() as u32;
+        let buffer = MFCreateMemoryBuffer(buffer_size)
+            .map_err(|e| RecorderError::MFError(format!("创建内存缓冲区失败: {}", e)))?;
+
+        // 锁定缓冲区并拷贝数据
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut max_length = 0u32;
+        let mut current_length = 0u32;
+        buffer
+            .Lock(
+                &mut data_ptr,
+                Some(&mut max_length),
+                Some(&mut current_length),
+            )
+            .map_err(|e| RecorderError::MFError(format!("锁定缓冲区失败: {}", e)))?;
+
+        ptr::copy_nonoverlapping(iyuv_data.as_ptr(), data_ptr, iyuv_data.len());
+
+        buffer
+            .SetCurrentLength(buffer_size)
+            .map_err(|e| RecorderError::MFError(format!("设置缓冲区长度失败: {}", e)))?;
+
+        buffer
+            .Unlock()
+            .map_err(|e| RecorderError::MFError(format!("解锁缓冲区失败: {}", e)))?;
+
+        sample
+            .AddBuffer(&buffer)
+            .map_err(|e| RecorderError::MFError(format!("添加 Buffer 到 Sample 失败: {}", e)))?;
+
+        // 设置 IYUV 格式的 stride
+        let width = self.params.width;
+        sample
+            .SetUINT32(&MF_MT_DEFAULT_STRIDE, width)
+            .ok();
 
         Ok(sample)
     }
