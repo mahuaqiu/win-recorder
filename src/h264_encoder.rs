@@ -16,8 +16,6 @@
 use crate::bgra_to_nv12::{bgra_to_nv12, bgra_to_iyuv};
 use crate::error::RecorderError;
 use crate::memory_byte_stream::{extract_nal_units, get_nal_type};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::*;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::mem::ManuallyDrop;
@@ -122,8 +120,6 @@ pub struct H264Encoder {
     encoder_input_id: u32,
     /// 输出流 ID（H264 编码器）
     encoder_output_id: u32,
-    /// DXGI Device Manager reset token (保留字段)
-    dxgi_reset_token: u32,
     /// 是否使用 CPU 模式（当 D3D11 硬件加速不可用时）
     use_cpu_mode: bool,
 }
@@ -172,7 +168,6 @@ impl H264Encoder {
             pps: Vec::new(),
             encoder_input_id: 0,
             encoder_output_id: 0,
-            dxgi_reset_token: 0,
             use_cpu_mode: false,
         })
     }
@@ -485,52 +480,6 @@ impl H264Encoder {
         Ok(())
     }
 
-    /// 创建 RGB32 输入媒体类型
-    unsafe fn create_rgb32_media_type(&self) -> Result<IMFMediaType, RecorderError> {
-        let media_type = MFCreateMediaType()
-            .map_err(|e| RecorderError::MFError(format!("创建 RGB32 MediaType 失败: {}", e)))?;
-
-        media_type
-            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
-            .map_err(|e| RecorderError::MFError(format!("设置主类型失败: {}", e)))?;
-
-        media_type
-            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
-            .map_err(|e| RecorderError::MFError(format!("设置子类型失败: {}", e)))?;
-
-        media_type
-            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-            .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
-
-        // 使用对齐后的分辨率
-        let aligned_width = (self.params.width + 15) & !15;
-        let aligned_height = (self.params.height + 15) & !15;
-        media_type
-            .SetUINT64(
-                &MF_MT_FRAME_SIZE,
-                ((aligned_width as u64) << 32) | (aligned_height as u64),
-            )
-            .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
-
-        media_type
-            .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
-            .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
-
-        media_type
-            .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)
-            .map_err(|e| RecorderError::MFError(format!("设置像素宽高比失败: {}", e)))?;
-
-        media_type
-            .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
-            .map_err(|e| RecorderError::MFError(format!("设置样本独立属性失败: {}", e)))?;
-
-        // 设置默认 stride (BGRA = width * 4)
-        let stride = (self.params.width * 4) as i32 as u32;
-        media_type
-            .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
-            .map_err(|e| RecorderError::MFError(format!("设置 stride 失败: {}", e)))?;
-
-        Ok(media_type)
     }
 
     /// 创建 NV12 媒体类型（颜色转换器输出 / H264 编码器输入）
