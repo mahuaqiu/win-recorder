@@ -74,6 +74,94 @@ pub fn bgra_to_nv12(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
     nv12
 }
 
+/// 将 BGRA 数据转换为 IYUV (YUV420P) 格式
+///
+/// IYUV 格式（也叫 I420）：
+/// - Y 平面：width * height 字节，YUV420 Planar
+/// - U 平面：width * height / 4 字节
+/// - V 平面：width * height / 4 字节
+///
+/// # 参数
+/// - bgra_data: BGRA 格式的帧数据
+/// - width: 帧宽度
+/// - height: 帧高度
+///
+/// # 返回
+/// IYUV 格式的数据
+pub fn bgra_to_iyuv(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let y_size = (width * height) as usize;
+    let uv_size = (width * height / 4) as usize;
+    let mut iyuv = vec![0u8; y_size + uv_size + uv_size];
+
+    let width = width as usize;
+    let height = height as usize;
+
+    // 1. 转换 Y 平面
+    for y in 0..height {
+        for x in 0..width {
+            let bgra_idx = (y * width + x) * 4;
+            let b = bgra_data[bgra_idx] as u32;
+            let g = bgra_data[bgra_idx + 1] as u32;
+            let r = bgra_data[bgra_idx + 2] as u32;
+            
+            let y_val = ((r * 306 + g * 601 + b * 117) >> 10) as u8;
+            
+            let y_idx = y * width + x;
+            iyuv[y_idx] = y_val;
+        }
+    }
+
+    // 2. 转换 U 平面 (2x2 块平均，跨行)
+    let mut u_offset = y_size;
+    for y in 0..height / 2 {
+        for x in 0..width / 2 {
+            let b00 = ((y * 2) * width + (x * 2)) * 4;
+            let b01 = ((y * 2) * width + (x * 2 + 1)) * 4;
+            let b10 = ((y * 2 + 1) * width + (x * 2)) * 4;
+            let b11 = ((y * 2 + 1) * width + (x * 2 + 1)) * 4;
+
+            let r = ((bgra_data[b00] as u32 + bgra_data[b01] as u32 
+                   + bgra_data[b10] as u32 + bgra_data[b11] as u32) / 4) as i32;
+            let g = ((bgra_data[b00 + 1] as u32 + bgra_data[b01 + 1] as u32 
+                   + bgra_data[b10 + 1] as u32 + bgra_data[b11 + 1] as u32) / 4) as i32;
+            let b_val = ((bgra_data[b00 + 2] as u32 + bgra_data[b01 + 2] as u32 
+                   + bgra_data[b10 + 2] as u32 + bgra_data[b11 + 2] as u32) / 4) as i32;
+
+            // BT.601 色度公式
+            let u_val = (((-r * 147 - g * 289 + b_val * 436) >> 10) + 128) as u8;
+            
+            iyuv[u_offset] = u_val;
+            u_offset += 1;
+        }
+    }
+
+    // 3. 转换 V 平面 (2x2 块平均)
+    let mut v_offset = y_size + uv_size;
+    for y in 0..height / 2 {
+        for x in 0..width / 2 {
+            let b00 = ((y * 2) * width + (x * 2)) * 4;
+            let b01 = ((y * 2) * width + (x * 2 + 1)) * 4;
+            let b10 = ((y * 2 + 1) * width + (x * 2)) * 4;
+            let b11 = ((y * 2 + 1) * width + (x * 2 + 1)) * 4;
+
+            let r = ((bgra_data[b00] as u32 + bgra_data[b01] as u32 
+                   + bgra_data[b10] as u32 + bgra_data[b11] as u32) / 4) as i32;
+            let g = ((bgra_data[b00 + 1] as u32 + bgra_data[b01 + 1] as u32 
+                   + bgra_data[b10 + 1] as u32 + bgra_data[b11 + 1] as u32) / 4) as i32;
+            let b_val = ((bgra_data[b00 + 2] as u32 + bgra_data[b01 + 2] as u32 
+                   + bgra_data[b10 + 2] as u32 + bgra_data[b11 + 2] as u32) / 4) as i32;
+
+            // BT.601 色度公式
+            let v_val = (((r * 615 - g * 515 - b_val * 100) >> 10) + 128) as u8;
+            
+            iyuv[v_offset] = v_val;
+            v_offset += 1;
+        }
+    }
+
+    iyuv
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

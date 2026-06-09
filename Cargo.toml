@@ -1,6 +1,6 @@
 [package]
 name = "win-recorder"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 
 [lib]
@@ -13,6 +13,7 @@ windows = { version = "0.58", features = [
     "Win32",
     "Win32_Foundation",
     "Win32_Media_MediaFoundation",
+    "Win32_Media_MediaFoundation_DirectX",
     "Win32_Media_Audio",
     "Win32_Graphics",
     "Win32_Graphics_Direct3D11",

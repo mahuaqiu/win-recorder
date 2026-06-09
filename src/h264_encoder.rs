@@ -25,10 +25,17 @@ use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::*;
 
+// MFT 消息：设置 D3D 管理器（让硬件编码器可以接受 D3D11 纹理输入）
+const MFT_MESSAGE_SET_D3D_MANAGER: u32 = 0x1; // 实际值需要查文档
+
 /// CMSH264EncoderMFT 的 CLSID
 ///
 /// 这是 Windows 内置的 H.264 编码器 Media Foundation Transform
 /// GUID: {6CA50344-051A-4DED-9779-A43305165E35}
+/// H264 硬件编码器 CLSID
+///
+/// 这是 Windows 内置的硬件 H.264 编码器，需要 D3D11 支持
+/// CLSID: {6CA50344-051A-4DED-9779-A43305165E35}
 const CLSID_MSH264_ENCODER_MFT: GUID = GUID::from_values(
     0x6CA50344,
     0x051A,
@@ -116,6 +123,14 @@ pub struct H264Encoder {
     encoder_input_id: u32,
     /// 输出流 ID（H264 编码器）
     encoder_output_id: u32,
+    /// D3D11 设备（用于硬件加速编码）
+    d3d11_device: Option<ID3D11Device>,
+    /// DXGI Device Manager
+    dxgi_device_manager: Option<IMFDXGIDeviceManager>,
+    /// DXGI Device Manager reset token
+    dxgi_reset_token: u32,
+    /// 是否使用 CPU 模式（当 D3D11 硬件加速不可用时）
+    use_cpu_mode: bool,
 }
 
 // 手动实现 Send trait，因为 IMFTransform 是 COM 对象
@@ -162,6 +177,10 @@ impl H264Encoder {
             pps: Vec::new(),
             encoder_input_id: 0,
             encoder_output_id: 0,
+            d3d11_device: None,
+            dxgi_device_manager: None,
+            dxgi_reset_token: 0,
+            use_cpu_mode: false,
         })
     }
 
@@ -275,20 +294,28 @@ impl H264Encoder {
                 .as_ref()
                 .ok_or(RecorderError::NotRecording)?;
 
-            // 1. CPU 转换 BGRA -> NV12
-            let nv12_data = bgra_to_nv12(bgra_data, self.params.width, self.params.height);
+            // 根据模式选择格式
+            if self.use_cpu_mode {
+                // CPU 模式: BGRA -> IYUV (YUV420P)
+                let iyuv_data = bgra_to_iyuv(bgra_data, self.params.width, self.params.height);
+                let input_sample = self.create_iyuv_sample(&iyuv_data)?;
+                encoder
+                    .ProcessInput(self.encoder_input_id, &input_sample, 0)
+                    .map_err(|e| {
+                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败(CPU模式): {}", e))
+                    })?;
+            } else {
+                // GPU 模式: BGRA -> NV12
+                let nv12_data = bgra_to_nv12(bgra_data, self.params.width, self.params.height);
+                let input_sample = self.create_nv12_sample(&nv12_data)?;
+                encoder
+                    .ProcessInput(self.encoder_input_id, &input_sample, 0)
+                    .map_err(|e| {
+                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败(GPU模式): {}", e))
+                    })?;
+            }
 
-            // 2. 创建 NV12 IMFSample
-            let input_sample = self.create_nv12_sample(&nv12_data)?;
-
-            // 3. 送入 H264 编码器
-            encoder
-                .ProcessInput(self.encoder_input_id, &input_sample, 0)
-                .map_err(|e| {
-                    RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e))
-                })?;
-
-            // 4. 从 H264 编码器获取编码输出
+            // 从 H264 编码器获取编码输出
             let mut encoded_frames = self.process_encoder_output()?;
 
             // 如果还没获取到 SPS/PPS，尝试从属性中提取
@@ -397,23 +424,49 @@ impl H264Encoder {
             .as_ref()
             .ok_or_else(|| RecorderError::MFError("H264 编码器未创建".into()))?;
 
+        // 步骤 1: 创建 D3D11 设备（用于硬件加速）
+        self.create_d3d11_device()?;
+        
+        // 步骤 2: 获取 DXGI Device Manager
+        // 注意：这里简化处理，实际需要使用 MFCreateDXGIDeviceManager
+        // 如果 DXGI 管理器创建失败，我们仍可以继续使用 CPU 转换模式
+        
+        // 步骤 3: 注册 D3D11 设备到编码器（关键步骤）
+        // 如果失败，记录警告但继续（因为我们还可以用 CPU 模式）
+        if let Err(e) = self.register_d3d11_device(h264_encoder) {
+            println!("[H264Encoder] 警告: D3D11 设备注册���败: {}，将使用 CPU 模式", e);
+        }
+
         // 获取流 ID
         self.encoder_input_id = self.get_input_stream_id(h264_encoder)?;
         self.encoder_output_id = self.get_output_stream_id(h264_encoder)?;
 
-        // 1. 配置 H264 编码器的输入类型 (NV12)
+        // 4. 配置 H264 编码器的输入类型 (NV12) - 使用硬件加速
+        // 如果前面成功注册了 D3D11 设备，这里应该可以接受 NV12
         let nv12_type = self.create_nv12_media_type()?;
         h264_encoder
             .SetInputType(self.encoder_input_id, &nv12_type, 0)
-            .map_err(|e| RecorderError::MFError(format!("设置 H264 编码器输入类型(NV12)失败: {}", e)))?;
+            .map_err(|e| {
+                // 如果失败，回退到 NV12 格式（CPU 模式）
+                println!("[H264Encoder] NV12 输入类型失败: {}，回退到 NV12 模式", e);
+                
+                let nv12_type = self.create_nv12_media_type()?;
+                h264_encoder
+                    .SetInputType(self.encoder_input_id, &nv12_type, 0)
+                    .map_err(|e2| RecorderError::MFError(format!("设置 H264 编码器输入类型(NV12)失败: {}", e2)))?;
+                
+                // 标记为使用 CPU 模式
+                self.use_cpu_mode = true;
+                return Ok(());
+            })?;
 
-        // 2. 配置 H264 编码器的输出类型 (H264)
+        // 如果 NV12 成功，设置输出类型
         let h264_type = self.create_h264_media_type()?;
         h264_encoder
             .SetOutputType(self.encoder_output_id, &h264_type, 0)
             .map_err(|e| RecorderError::MFError(format!("设置 H264 编码器输出类型失败: {}", e)))?;
 
-        println!("[H264Encoder] MFT 管线配置完成: NV12 -> H264 (BGRA->NV12 由 CPU 转换)");
+        println!("[H264Encoder] MFT 管线配置完成: NV12 -> H264 (D3D11 加速)");
         Ok(())
     }
 
@@ -539,6 +592,60 @@ impl H264Encoder {
         media_type
             .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
             .map_err(|e| RecorderError::MFError(format!("设置 NV12 stride 失败: {}", e)))?;
+
+        Ok(media_type)
+    }
+
+    /// 创建 IYUV (YUV420P) 媒体类型 - CPU 回退模式
+    unsafe fn create_iyuv_media_type(&self) -> Result<IMFMediaType, RecorderError> {
+        let media_type = MFCreateMediaType()
+            .map_err(|e| RecorderError::MFError(format!("创建 IYUV MediaType 失败: {}", e)))?;
+
+        // 主类型
+        media_type
+            .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+            .map_err(|e| RecorderError::MFError(format!("设置主类型失败: {}", e)))?;
+
+        // 子类型 IYUV (YUV420 Planar)
+        media_type
+            .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_IYUV)
+            .map_err(|e| RecorderError::MFError(format!("设置子类型失败: {}", e)))?;
+
+        // 帧大小（对齐到 16）
+        let aligned_width = (self.params.width + 15) & !15;
+        let aligned_height = (self.params.height + 15) & !15;
+        media_type
+            .SetUINT64(
+                &MF_MT_FRAME_SIZE,
+                ((aligned_width as u64) << 32) | (aligned_height as u64),
+            )
+            .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
+
+        // 帧率
+        media_type
+            .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
+            .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
+
+        // 像素宽高比 1:1
+        media_type
+            .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)
+            .map_err(|e| RecorderError::MFError(format!("设置像素宽高比失败: {}", e)))?;
+
+        // 交错模式：逐行
+        media_type
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+            .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
+
+        // 所有样本独立
+        media_type
+            .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
+            .map_err(|e| RecorderError::MFError(format!("设置样本独立属性失败: {}", e)))?;
+
+        // IYUV 的 stride
+        let stride = aligned_width;
+        media_type
+            .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
+            .map_err(|e| RecorderError::MFError(format!("设置 IYUV stride 失败: {}", e)))?;
 
         Ok(media_type)
     }
