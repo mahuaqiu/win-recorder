@@ -458,10 +458,13 @@ impl H264Encoder {
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
 
+        // 使用对齐后的分辨率
+        let aligned_width = (self.params.width + 15) & !15;
+        let aligned_height = (self.params.height + 15) & !15;
         media_type
             .SetUINT64(
                 &MF_MT_FRAME_SIZE,
-                ((self.params.width as u64) << 32) | (self.params.height as u64),
+                ((aligned_width as u64) << 32) | (aligned_height as u64),
             )
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
@@ -491,36 +494,51 @@ impl H264Encoder {
         let media_type = MFCreateMediaType()
             .map_err(|e| RecorderError::MFError(format!("创建 NV12 MediaType 失败: {}", e)))?;
 
+        // 主类型
         media_type
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
             .map_err(|e| RecorderError::MFError(format!("设置主类型失败: {}", e)))?;
 
+        // 子类型 NV12
         media_type
             .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
             .map_err(|e| RecorderError::MFError(format!("设置子类型失败: {}", e)))?;
 
-        media_type
-            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
-            .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
-
+        // 帧大小（对齐到 16）
+        let aligned_width = (self.params.width + 15) & !15;
+        let aligned_height = (self.params.height + 15) & !15;
         media_type
             .SetUINT64(
                 &MF_MT_FRAME_SIZE,
-                ((self.params.width as u64) << 32) | (self.params.height as u64),
+                ((aligned_width as u64) << 32) | (aligned_height as u64),
             )
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
+        // 帧率
         media_type
             .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
             .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
 
+        // 像素宽高比 1:1
         media_type
             .SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1u64 << 32) | 1u64)
             .map_err(|e| RecorderError::MFError(format!("设置像素宽高比失败: {}", e)))?;
 
+        // 交错模式：逐行
+        media_type
+            .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
+            .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
+
+        // 所有样本独立
         media_type
             .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
             .map_err(|e| RecorderError::MFError(format!("设置样本独立属性失败: {}", e)))?;
+
+        // NV12 的 stride：Y 平面 stride = 对齐后的宽度
+        let stride = aligned_width;
+        media_type
+            .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
+            .map_err(|e| RecorderError::MFError(format!("设置 NV12 stride 失败: {}", e)))?;
 
         Ok(media_type)
     }
@@ -542,10 +560,13 @@ impl H264Encoder {
             .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
             .map_err(|e| RecorderError::MFError(format!("设置交错模式失败: {}", e)))?;
 
+        // 使用对齐后的分辨率
+        let aligned_width = (self.params.width + 15) & !15;
+        let aligned_height = (self.params.height + 15) & !15;
         media_type
             .SetUINT64(
                 &MF_MT_FRAME_SIZE,
-                ((self.params.width as u64) << 32) | (self.params.height as u64),
+                ((aligned_width as u64) << 32) | (aligned_height as u64),
             )
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
@@ -653,7 +674,7 @@ impl H264Encoder {
         // 设置 NV12 格式的 stride
         // NV12: Y 平面 (width * height) + UV 平面 (width * height / 2)
         // Y stride = width, UV stride = width
-        let width = self.params.width as i32;
+        let width = self.params.width;
         sample
             .SetUINT32(&MF_MT_DEFAULT_STRIDE, width)
             .ok(); // stride 设置失败不是致命错误
