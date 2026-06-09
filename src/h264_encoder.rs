@@ -125,9 +125,7 @@ pub struct H264Encoder {
     encoder_output_id: u32,
     /// D3D11 设备（用于硬件加速编码）
     d3d11_device: Option<ID3D11Device>,
-    /// DXGI Device Manager
-    dxgi_device_manager: Option<IMFDXGIDeviceManager>,
-    /// DXGI Device Manager reset token
+    /// DXGI Device Manager reset token (保留字段)
     dxgi_reset_token: u32,
     /// 是否使用 CPU 模式（当 D3D11 硬件加速不可用时）
     use_cpu_mode: bool,
@@ -178,7 +176,6 @@ impl H264Encoder {
             encoder_input_id: 0,
             encoder_output_id: 0,
             d3d11_device: None,
-            dxgi_device_manager: None,
             dxgi_reset_token: 0,
             use_cpu_mode: false,
         })
@@ -447,13 +444,13 @@ impl H264Encoder {
         h264_encoder
             .SetInputType(self.encoder_input_id, &nv12_type, 0)
             .map_err(|e| {
-                // 如果失败，回退到 NV12 格式（CPU 模式）
-                println!("[H264Encoder] NV12 输入类型失败: {}，回退到 NV12 模式", e);
+                // 如果失败，回退到 IYUV 格式（CPU 模式）
+                println!("[H264Encoder] NV12 输入类型失败: {}，回退到 IYUV 模式", e);
                 
-                let nv12_type = self.create_nv12_media_type()?;
+                let iyuv_type = self.create_iyuv_media_type()?;
                 h264_encoder
-                    .SetInputType(self.encoder_input_id, &nv12_type, 0)
-                    .map_err(|e2| RecorderError::MFError(format!("设置 H264 编码器输入类型(NV12)失败: {}", e2)))?;
+                    .SetInputType(self.encoder_input_id, &iyuv_type, 0)
+                    .map_err(|e2| RecorderError::MFError(format!("设置 H264 编码器输入类型(IYUV)失败: {}", e2)))?;
                 
                 // 标记为使用 CPU 模式
                 self.use_cpu_mode = true;
