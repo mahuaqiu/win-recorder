@@ -13,7 +13,6 @@
 //! H264 编码器 MFT 通常不接受 RGB32 输入，只接受 NV12 或 YUV420 格式。
 //! 因此需要在 RGB32 和 H264 编码器之间插入颜色转换 MFT。
 
-use crate::bgra_to_nv12::{bgra_to_nv12, bgra_to_iyuv};
 use crate::error::RecorderError;
 use crate::memory_byte_stream::{extract_nal_units, get_nal_type};
 use pyo3::prelude::*;
@@ -121,7 +120,7 @@ pub struct H264Encoder {
     /// 输出流 ID（H264 编码器）
     encoder_output_id: u32,
     /// 是否使用 CPU 模式（当 D3D11 硬件加速不可用时）
-    use_cpu_mode: bool,
+    
 }
 
 // 手动实现 Send trait，因为 IMFTransform 是 COM 对象
@@ -168,7 +167,6 @@ impl H264Encoder {
             pps: Vec::new(),
             encoder_input_id: 0,
             encoder_output_id: 0,
-            use_cpu_mode: false,
         })
     }
 
@@ -282,26 +280,13 @@ impl H264Encoder {
                 .as_ref()
                 .ok_or(RecorderError::NotRecording)?;
 
-            // 根据模式选择格式
-            if self.use_cpu_mode {
-                // CPU 模式: BGRA -> IYUV (YUV420P)
-                let iyuv_data = bgra_to_iyuv(bgra_data, self.params.width, self.params.height);
-                let input_sample = self.create_iyuv_sample(&iyuv_data)?;
-                encoder
-                    .ProcessInput(self.encoder_input_id, &input_sample, 0)
-                    .map_err(|e| {
-                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败(CPU模式): {}", e))
-                    })?;
-            } else {
-                // GPU 模式: BGRA -> NV12
-                let nv12_data = bgra_to_nv12(bgra_data, self.params.width, self.params.height);
-                let input_sample = self.create_nv12_sample(&nv12_data)?;
-                encoder
-                    .ProcessInput(self.encoder_input_id, &input_sample, 0)
-                    .map_err(|e| {
-                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败(GPU模式): {}", e))
-                    })?;
-            }
+            // 直接使用 BGRA 数据（和 MFSinkWriter 一样，编码器内部自动处理）
+            let input_sample = self.create_bgra_sample(bgra_data)?;
+            encoder
+                .ProcessInput(self.encoder_input_id, &input_sample, 0)
+                .map_err(|e| {
+                    RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e))
+                })?;
 
             // 从 H264 编码器获取编码输出
             let mut encoded_frames = self.process_encoder_output()?;
@@ -420,7 +405,6 @@ impl H264Encoder {
         // 先尝试 NV12，失败则回退到 IYUV
         let input_type = match self.try_set_nv12_input(h264_encoder) {
             Ok(_) => {
-                self.use_cpu_mode = false;
                 println!("[H264Encoder] 使用 NV12 模式");
                 None
             }
@@ -434,7 +418,6 @@ impl H264Encoder {
             h264_encoder
                 .SetInputType(self.encoder_input_id, &iyuv_type, 0)
                 .map_err(|e| RecorderError::MFError(format!("设置 IYUV 输入类型失败: {}", e)))?;
-            self.use_cpu_mode = true;
         }
 
         // 2. 配置 H264 输出类型
@@ -444,7 +427,7 @@ impl H264Encoder {
             .map_err(|e| RecorderError::MFError(format!("设置 H264 输出类型失败: {}", e)))?;
 
         println!("[H264Encoder] 管线配置完��: {} -> H264", 
-            if self.use_cpu_mode { "IYUV (CPU)" } else { "NV12" });
+            RGB32 (内置转换));
         Ok(())
     }
 
@@ -1176,3 +1159,52 @@ impl Drop for H264Encoder {
         }
     }
 }
+
+    /// 从 BGRA 数据创建 IMFSample（和 MFSinkWriter 一样）
+    unsafe fn create_bgra_sample(&self, bgra_data: &[u8]) -> Result<IMFSample, RecorderError> {
+        let sample = MFCreateSample()
+            .map_err(|e| RecorderError::MFError(format!("创建 IMFSample 失败: {}", e)))?;
+
+        // 设置时间戳
+        let timestamp = self.frame_count as i64 * self.frame_duration;
+        sample
+            .SetSampleTime(timestamp)
+            .map_err(|e| RecorderError::MFError(format!("设置样本时间失败: {}", e)))?;
+
+        sample
+            .SetSampleDuration(self.frame_duration)
+            .map_err(|e| RecorderError::MFError(format!("设置样本持续时间失败: {}", e)))?;
+
+        // 创建内存缓冲区
+        let buffer_size = bgra_data.len() as u32;
+        let buffer = MFCreateMemoryBuffer(buffer_size)
+            .map_err(|e| RecorderError::MFError(format!("创建内存缓冲区失败: {}", e)))?;
+
+        // 锁定缓冲区并拷贝数据
+        let mut data_ptr: *mut u8 = ptr::null_mut();
+        let mut max_length = 0u32;
+        let mut current_length = 0u32;
+        buffer
+            .Lock(
+                &mut data_ptr,
+                Some(&mut max_length),
+                Some(&mut current_length),
+            )
+            .map_err(|e| RecorderError::MFError(format!("锁定缓冲区失败: {}", e)))?;
+
+        ptr::copy_nonoverlapping(bgra_data.as_ptr(), data_ptr, bgra_data.len());
+
+        buffer
+            .SetCurrentLength(buffer_size)
+            .map_err(|e| RecorderError::MFError(format!("设置缓冲区长度失败: {}", e)))?;
+
+        buffer
+            .Unlock()
+            .map_err(|e| RecorderError::MFError(format!("解锁缓冲区失败: {}", e)))?;
+
+        sample
+            .AddBuffer(&buffer)
+            .map_err(|e| RecorderError::MFError(format!("添加 Buffer 到 Sample 失败: {}", e)))?;
+
+        Ok(sample)
+    }
