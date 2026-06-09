@@ -421,33 +421,44 @@ impl H264Encoder {
         self.encoder_input_id = self.get_input_stream_id(h264_encoder)?;
         self.encoder_output_id = self.get_output_stream_id(h264_encoder)?;
 
-        // 1. 配置 H264 编码器的输入类型 (NV12)
-        let nv12_type = self.create_nv12_media_type()?;
-        h264_encoder
-            .SetInputType(self.encoder_input_id, &nv12_type, 0)
-            .map_err(|e| {
-                // 如果失败，回退到 IYUV 格式（CPU 模式）
-                println!("[H264Encoder] NV12 输入类型失败: {}，回退到 IYUV 模式", e);
-                
-                let iyuv_type = self.create_iyuv_media_type()?;
-                h264_encoder
-                    .SetInputType(self.encoder_input_id, &iyuv_type, 0)
-                    .map_err(|e2| RecorderError::MFError(format!("设置 H264 编码器输入类型(IYUV)失败: {}", e2)))?;
-                
-                // 标记为使用 CPU 模式
-                self.use_cpu_mode = true;
-                return Ok(());
-            })?;
+        // 1. 配置 H264 编码器的输入类型
+        // 先尝试 NV12，失败则回退到 IYUV
+        let input_type = match self.try_set_nv12_input(h264_encoder) {
+            Ok(_) => {
+                self.use_cpu_mode = false;
+                println!("[H264Encoder] 使用 NV12 模式");
+                None
+            }
+            Err(_) => {
+                println!("[H264Encoder] NV12 失败，尝试 IYUV 模式");
+                Some(self.create_iyuv_media_type()?)
+            }
+        };
+        
+        if let Some(iyuv_type) = input_type {
+            h264_encoder
+                .SetInputType(self.encoder_input_id, &iyuv_type, 0)
+                .map_err(|e| RecorderError::MFError(format!("设置 IYUV 输入类型失败: {}", e)))?;
+            self.use_cpu_mode = true;
+        }
 
-        // 如果 NV12 成功，设置输出类型
+        // 2. 配置 H264 输出类型
         let h264_type = self.create_h264_media_type()?;
         h264_encoder
             .SetOutputType(self.encoder_output_id, &h264_type, 0)
-            .map_err(|e| RecorderError::MFError(format!("设置 H264 编码器输出类型失败: {}", e)))?;
+            .map_err(|e| RecorderError::MFError(format!("设置 H264 输出类型失败: {}", e)))?;
 
-        println!("[H264Encoder] MFT 管线配置完成: {} -> H264", 
+        println!("[H264Encoder] 管线配置完��: {} -> H264", 
             if self.use_cpu_mode { "IYUV (CPU)" } else { "NV12" });
         Ok(())
+    }
+
+    /// 尝试设置 NV12 输入类型
+    unsafe fn try_set_nv12_input(&self, h264_encoder: &IMFTransform) -> Result<(), RecorderError> {
+        let nv12_type = self.create_nv12_media_type()?;
+        h264_encoder
+            .SetInputType(self.encoder_input_id, &nv12_type, 0)
+            .map_err(|e| RecorderError::MFError(format!("设置 NV12 输入类型失败: {}", e)))
     }
 
     /// 发送流控制消息
