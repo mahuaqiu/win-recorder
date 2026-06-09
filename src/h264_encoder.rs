@@ -17,8 +17,10 @@ use crate::error::RecorderError;
 use crate::memory_byte_stream::{extract_nal_units, get_nal_type};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+use std::mem::ManuallyDrop;
 use std::ptr;
 use windows::core::GUID;
+use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::*;
 
@@ -111,6 +113,8 @@ pub struct H264Encoder {
     params: H264EncodeParams,
     /// 是否已初始化
     initialized: bool,
+    /// 当前线程的 COM 是否由本编码器初始化
+    com_initialized: bool,
     /// 帧持续时间（100ns 单位）
     frame_duration: i64,
     /// 帧计数
@@ -140,7 +144,18 @@ impl H264Encoder {
     ///
     /// # 返回
     /// 成功返回 H264Encoder 实例（尚未初始化，需调用 start()）
-    pub fn new(params: H264EncodeParams) -> Result<Self, RecorderError> {
+    pub fn from_params(params: H264EncodeParams) -> Result<Self, RecorderError> {
+        if params.fps == 0 {
+            return Err(RecorderError::InvalidParam(
+                "fps must be greater than 0".into(),
+            ));
+        }
+        if params.width == 0 || params.height == 0 {
+            return Err(RecorderError::InvalidParam(
+                "width and height must be greater than 0".into(),
+            ));
+        }
+
         // 分辨率对齐：宽高必须是 16 的倍数（H264 编码器要求）
         let aligned_width = (params.width + 15) & !15;
         let aligned_height = (params.height + 15) & !15;
@@ -156,6 +171,7 @@ impl H264Encoder {
             h264_encoder: None,
             params,
             initialized: false,
+            com_initialized: false,
             frame_duration,
             frame_count: 0,
             sps: Vec::new(),
@@ -176,7 +192,20 @@ impl H264Encoder {
             return Err(RecorderError::AlreadyRecording);
         }
 
-        unsafe {
+        let start_result = unsafe {
+            // CoCreateInstance 需要当前线程先初始化 COM。
+            if let Err(e) = CoInitializeEx(None, COINIT_MULTITHREADED).ok() {
+                if e.code() != RPC_E_CHANGED_MODE {
+                    return Err(RecorderError::MFError(format!(
+                        "CoInitializeEx 失败: {}",
+                        e
+                    )));
+                }
+                self.com_initialized = false;
+            } else {
+                self.com_initialized = true;
+            }
+
             // 启动 Media Foundation
             MFStartup(MFSTARTUP_LITE, 0)
                 .map_err(|e| RecorderError::MFError(format!("MFStartup 失败: {}", e)))?;
@@ -206,6 +235,20 @@ impl H264Encoder {
                 "[H264Encoder] 编码器初始化成功: {}x{} @ {}fps, profile={}",
                 self.params.width, self.params.height, self.params.fps, self.params.profile
             );
+            Ok::<(), RecorderError>(())
+        };
+
+        if let Err(err) = start_result {
+            unsafe {
+                self.color_converter = None;
+                self.h264_encoder = None;
+                let _ = MFShutdown();
+                if self.com_initialized {
+                    CoUninitialize();
+                    self.com_initialized = false;
+                }
+            }
+            return Err(err);
         }
 
         // 返回 SPS/PPS 作为初始化结果
@@ -233,7 +276,10 @@ impl H264Encoder {
     ///
     /// # 返回
     /// 编码后的帧数据列表（一帧输入可能产生多个输出帧，如 SPS+PPS+IDR）
-    pub fn encode_frame_data(&mut self, bgra_data: &[u8]) -> Result<Vec<EncodedFrame>, RecorderError> {
+    pub fn encode_frame_data(
+        &mut self,
+        bgra_data: &[u8],
+    ) -> Result<Vec<EncodedFrame>, RecorderError> {
         if !self.initialized {
             return Err(RecorderError::NotRecording);
         }
@@ -258,7 +304,9 @@ impl H264Encoder {
 
             color_converter
                 .ProcessInput(self.color_input_id, &input_sample, 0)
-                .map_err(|e| RecorderError::MFError(format!("颜色转换器 ProcessInput 失败: {}", e)))?;
+                .map_err(|e| {
+                    RecorderError::MFError(format!("颜色转换器 ProcessInput 失败: {}", e))
+                })?;
 
             // 3. 从颜色转换器获取 NV12 输出
             let nv12_samples = self.process_color_converter_output()?;
@@ -272,7 +320,9 @@ impl H264Encoder {
             for nv12_sample in &nv12_samples {
                 encoder
                     .ProcessInput(self.encoder_input_id, nv12_sample, 0)
-                    .map_err(|e| RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e)))?;
+                    .map_err(|e| {
+                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e))
+                    })?;
             }
 
             // 5. 从 H264 编码器获取编码输出
@@ -317,10 +367,7 @@ impl H264Encoder {
         unsafe {
             // 1. 发送 Drain 消息给颜色转换器
             if let Some(color_converter) = &self.color_converter {
-                let _ = color_converter.ProcessMessage(
-                    MFT_MESSAGE_COMMAND_DRAIN,
-                    0,
-                );
+                let _ = color_converter.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
 
                 // 获取剩余输出
                 if let Ok(frames) = self.process_color_converter_output() {
@@ -337,10 +384,7 @@ impl H264Encoder {
 
             // 2. 发送 Drain 消息给 H264 编码器
             if let Some(encoder) = &self.h264_encoder {
-                let _ = encoder.ProcessMessage(
-                    MFT_MESSAGE_COMMAND_DRAIN,
-                    0,
-                );
+                let _ = encoder.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
 
                 // 获取所有剩余输出
                 if let Ok(frames) = self.process_encoder_output() {
@@ -354,6 +398,10 @@ impl H264Encoder {
 
             // 关闭 Media Foundation
             let _ = MFShutdown();
+            if self.com_initialized {
+                CoUninitialize();
+                self.com_initialized = false;
+            }
         }
 
         self.initialized = false;
@@ -379,7 +427,7 @@ impl H264Encoder {
     }
 
     /// 获取帧计数
-    pub fn frame_count(&self) -> u64 {
+    pub fn encoded_frame_count(&self) -> u64 {
         self.frame_count
     }
 
@@ -387,12 +435,9 @@ impl H264Encoder {
 
     /// 创建颜色转换 MFT
     unsafe fn create_color_converter(&self) -> Result<IMFTransform, RecorderError> {
-        let converter: IMFTransform = CoCreateInstance(
-            &CLSID_CColorConvertDMO,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-        .map_err(|e| RecorderError::MFError(format!("创建颜色转换 MFT 失败: {}", e)))?;
+        let converter: IMFTransform =
+            CoCreateInstance(&CLSID_CColorConvertDMO, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| RecorderError::MFError(format!("创建颜色转换 MFT 失败: {}", e)))?;
 
         println!("[H264Encoder] 颜色转换 MFT 创建成功");
         Ok(converter)
@@ -400,12 +445,9 @@ impl H264Encoder {
 
     /// 创建 H264 编码 MFT
     unsafe fn create_h264_encoder(&self) -> Result<IMFTransform, RecorderError> {
-        let encoder: IMFTransform = CoCreateInstance(
-            &CLSID_CMSH264EncoderMFT,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
-        .map_err(|e| RecorderError::MFError(format!("创建 H264 编码 MFT 失败: {}", e)))?;
+        let encoder: IMFTransform =
+            CoCreateInstance(&CLSID_CMSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| RecorderError::MFError(format!("创建 H264 编码 MFT 失败: {}", e)))?;
 
         println!("[H264Encoder] H264 编码 MFT 创建成功");
         Ok(encoder)
@@ -471,20 +513,28 @@ impl H264Encoder {
         // 通知开始流
         color_converter
             .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-            .map_err(|e| RecorderError::MFError(format!("颜色转换器 START_OF_STREAM 失败: {}", e)))?;
+            .map_err(|e| {
+                RecorderError::MFError(format!("颜色转换器 START_OF_STREAM 失败: {}", e))
+            })?;
 
         h264_encoder
             .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-            .map_err(|e| RecorderError::MFError(format!("H264 编码器 START_OF_STREAM 失败: {}", e)))?;
+            .map_err(|e| {
+                RecorderError::MFError(format!("H264 编码器 START_OF_STREAM 失败: {}", e))
+            })?;
 
         // 通知开始流处理
         color_converter
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-            .map_err(|e| RecorderError::MFError(format!("颜色转换器 BEGIN_STREAMING 失败: {}", e)))?;
+            .map_err(|e| {
+                RecorderError::MFError(format!("颜色转换器 BEGIN_STREAMING 失败: {}", e))
+            })?;
 
         h264_encoder
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-            .map_err(|e| RecorderError::MFError(format!("H264 编码器 BEGIN_STREAMING 失败: {}", e)))?;
+            .map_err(|e| {
+                RecorderError::MFError(format!("H264 编码器 BEGIN_STREAMING 失败: {}", e))
+            })?;
 
         println!("[H264Encoder] 流控制消息已发送");
         Ok(())
@@ -515,10 +565,7 @@ impl H264Encoder {
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
         media_type
-            .SetUINT64(
-                &MF_MT_FRAME_RATE,
-                ((self.params.fps as u64) << 32) | 1u64,
-            )
+            .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
             .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
 
         media_type
@@ -563,10 +610,7 @@ impl H264Encoder {
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
         media_type
-            .SetUINT64(
-                &MF_MT_FRAME_RATE,
-                ((self.params.fps as u64) << 32) | 1u64,
-            )
+            .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
             .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
 
         media_type
@@ -605,10 +649,7 @@ impl H264Encoder {
             .map_err(|e| RecorderError::MFError(format!("设置帧大小失败: {}", e)))?;
 
         media_type
-            .SetUINT64(
-                &MF_MT_FRAME_RATE,
-                ((self.params.fps as u64) << 32) | 1u64,
-            )
+            .SetUINT64(&MF_MT_FRAME_RATE, ((self.params.fps as u64) << 32) | 1u64)
             .map_err(|e| RecorderError::MFError(format!("设置帧率失败: {}", e)))?;
 
         media_type
@@ -642,20 +683,24 @@ impl H264Encoder {
 
     /// 获取 MFT 的输入流 ID
     unsafe fn get_input_stream_id(&self, transform: &IMFTransform) -> Result<u32, RecorderError> {
-        let mut id = 0u32;
-        transform
-            .GetStreamIDs(1, Some(&mut id), 0, None)
-            .map_err(|e| RecorderError::MFError(format!("获取输入流 ID 失败: {}", e)))?;
-        Ok(id)
+        let mut input_ids = [0u32; 1];
+        let mut output_ids = [0u32; 1];
+        match transform.GetStreamIDs(&mut input_ids, &mut output_ids) {
+            Ok(_) => Ok(input_ids[0]),
+            Err(e) if e.code().0 == 0x80004001u32 as i32 => Ok(0),
+            Err(e) => Err(RecorderError::MFError(format!("获取输入流 ID 失败: {}", e))),
+        }
     }
 
     /// 获取 MFT 的输出流 ID
     unsafe fn get_output_stream_id(&self, transform: &IMFTransform) -> Result<u32, RecorderError> {
-        let mut id = 0u32;
-        transform
-            .GetStreamIDs(0, None, 1, Some(&mut id))
-            .map_err(|e| RecorderError::MFError(format!("获取输出流 ID 失败: {}", e)))?;
-        Ok(id)
+        let mut input_ids = [0u32; 1];
+        let mut output_ids = [0u32; 1];
+        match transform.GetStreamIDs(&mut input_ids, &mut output_ids) {
+            Ok(_) => Ok(output_ids[0]),
+            Err(e) if e.code().0 == 0x80004001u32 as i32 => Ok(0),
+            Err(e) => Err(RecorderError::MFError(format!("获取输出流 ID 失败: {}", e))),
+        }
     }
 
     /// 从 BGRA 数据创建 IMFSample
@@ -683,7 +728,11 @@ impl H264Encoder {
         let mut max_length = 0u32;
         let mut current_length = 0u32;
         buffer
-            .Lock(&mut data_ptr, Some(&mut max_length), Some(&mut current_length))
+            .Lock(
+                &mut data_ptr,
+                Some(&mut max_length),
+                Some(&mut current_length),
+            )
             .map_err(|e| RecorderError::MFError(format!("锁定缓冲区失败: {}", e)))?;
 
         ptr::copy_nonoverlapping(bgra_data.as_ptr(), data_ptr, bgra_data.len());
@@ -729,30 +778,26 @@ impl H264Encoder {
                 .AddBuffer(&output_buffer)
                 .map_err(|e| RecorderError::MFError(format!("添加输出 Buffer 失败: {}", e)))?;
 
-            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+            let output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: self.color_output_id,
-                pEvents: None,
-                pSample: Some(output_sample.clone()),
+                pEvents: ManuallyDrop::new(None),
+                pSample: ManuallyDrop::new(Some(output_sample.clone())),
                 dwStatus: 0,
             };
 
             let mut process_status = 0u32;
+            let mut output_buffers = [output_data_buffer];
 
             let result = color_converter.ProcessOutput(
                 0, // dwFlags
-                1, // cOutputBufferCount
-                &mut output_data_buffer,
-                Some(&mut process_status),
+                &mut output_buffers,
+                &mut process_status,
             );
 
-            match result.ok() {
+            match result {
                 Ok(_) => {
-                    if let Some(sample) = output_data_buffer.pSample {
-                        output_samples.push(sample);
-                    }
-                    // 检查是否还有更多输出
-                    if process_status & MFT_PROCESS_OUTPUT_STATUS_PLAY_READY as u32 != 0 {
-                        continue;
+                    if let Some(sample) = output_buffers[0].pSample.as_ref() {
+                        output_samples.push(sample.clone());
                     }
                 }
                 Err(e) => {
@@ -797,34 +842,31 @@ impl H264Encoder {
             let output_buffer = MFCreateMemoryBuffer(output_buffer_size)
                 .map_err(|e| RecorderError::MFError(format!("创建 H264 输出缓冲区失败: {}", e)))?;
 
-            let output_sample = MFCreateSample()
-                .map_err(|e| RecorderError::MFError(format!("创建 H264 输出 Sample 失败: {}", e)))?;
+            let output_sample = MFCreateSample().map_err(|e| {
+                RecorderError::MFError(format!("创建 H264 输出 Sample 失败: {}", e))
+            })?;
 
-            output_sample
-                .AddBuffer(&output_buffer)
-                .map_err(|e| RecorderError::MFError(format!("添加 H264 输出 Buffer 失败: {}", e)))?;
+            output_sample.AddBuffer(&output_buffer).map_err(|e| {
+                RecorderError::MFError(format!("添加 H264 输出 Buffer 失败: {}", e))
+            })?;
 
-            let mut output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
+            let output_data_buffer = MFT_OUTPUT_DATA_BUFFER {
                 dwStreamID: self.encoder_output_id,
-                pEvents: None,
-                pSample: Some(output_sample.clone()),
+                pEvents: ManuallyDrop::new(None),
+                pSample: ManuallyDrop::new(Some(output_sample.clone())),
                 dwStatus: 0,
             };
 
             let mut process_status = 0u32;
+            let mut output_buffers = [output_data_buffer];
 
-            let result = encoder.ProcessOutput(
-                0,
-                1,
-                &mut output_data_buffer,
-                Some(&mut process_status),
-            );
+            let result = encoder.ProcessOutput(0, &mut output_buffers, &mut process_status);
 
-            match result.ok() {
+            match result {
                 Ok(_) => {
-                    if let Some(sample) = output_data_buffer.pSample {
+                    if let Some(sample) = output_buffers[0].pSample.as_ref() {
                         // 从 Sample 提取编码数据
-                        let frame_data = self.extract_sample_data(&sample)?;
+                        let frame_data = self.extract_sample_data(sample)?;
                         if !frame_data.is_empty() {
                             // 将编码数据拆分为 NAL 单元
                             let nal_units = extract_nal_units(&frame_data);
@@ -879,9 +921,8 @@ impl H264Encoder {
 
     /// 从 IMFSample 提取原始数据
     unsafe fn extract_sample_data(&self, sample: &IMFSample) -> Result<Vec<u8>, RecorderError> {
-        let mut buffer_count = 0u32;
-        sample
-            .GetBufferCount(&mut buffer_count)
+        let buffer_count = sample
+            .GetBufferCount()
             .map_err(|e| RecorderError::MFError(format!("获取 Buffer 数量失败: {}", e)))?;
 
         let mut total_data = Vec::new();
@@ -896,12 +937,15 @@ impl H264Encoder {
             let mut current_length = 0u32;
 
             buffer
-                .Lock(&mut data_ptr, Some(&mut max_length), Some(&mut current_length))
+                .Lock(
+                    &mut data_ptr,
+                    Some(&mut max_length),
+                    Some(&mut current_length),
+                )
                 .map_err(|e| RecorderError::MFError(format!("锁定输出 Buffer 失败: {}", e)))?;
 
             if current_length > 0 && !data_ptr.is_null() {
-                let data_slice =
-                    std::slice::from_raw_parts(data_ptr, current_length as usize);
+                let data_slice = std::slice::from_raw_parts(data_ptr, current_length as usize);
                 total_data.extend_from_slice(data_slice);
             }
 
@@ -930,19 +974,18 @@ impl H264Encoder {
 
         // 尝试从输出类型获取 SPS
         // 使用 MF_MT_MPEG_SEQUENCE_HEADER 属性，它包含 SPS+PPS
-        let mut header_length = 0u32;
-        let result = output_type.GetBlobSize(
-            &MF_MT_MPEG_SEQUENCE_HEADER,
-            &mut header_length,
-        );
+        let result = output_type.GetBlobSize(&MF_MT_MPEG_SEQUENCE_HEADER);
 
-        if result.is_ok() && header_length > 0 {
+        if let Ok(header_length) = result {
+            if header_length == 0 {
+                return Ok(());
+            }
             let mut header_data = vec![0u8; header_length as usize];
             let mut actual_length = 0u32;
             let get_result = output_type.GetBlob(
                 &MF_MT_MPEG_SEQUENCE_HEADER,
                 &mut header_data,
-                Some(&mut actual_length),
+                Some(&mut actual_length as *mut u32),
             );
 
             if get_result.is_ok() && actual_length > 0 {
@@ -982,10 +1025,7 @@ impl H264Encoder {
 
                 if self.sps.is_empty() {
                     self.sps = sps;
-                    println!(
-                        "[H264Encoder] 从属性中提取 SPS: {} 字节",
-                        sps_len
-                    );
+                    println!("[H264Encoder] 从属性中提取 SPS: {} 字节", sps_len);
                 }
                 offset += sps_len;
             }
@@ -1002,10 +1042,7 @@ impl H264Encoder {
 
                 if self.pps.is_empty() {
                     self.pps = pps;
-                    println!(
-                        "[H264Encoder] 从属性中提取 PPS: {} 字节",
-                        pps_len
-                    );
+                    println!("[H264Encoder] 从属性中提取 PPS: {} 字节", pps_len);
                 }
             }
         }
@@ -1041,17 +1078,15 @@ impl H264Encoder {
     /// 此构造函数自动检测显示器分辨率
     #[new]
     #[pyo3(signature = (fps=10, bitrate=2000000, monitor=1, profile=66))]
-    pub fn new(
-        fps: u32,
-        bitrate: u32,
-        monitor: u32,
-        profile: u32,
-    ) -> Result<Self, RecorderError> {
+    pub fn new(fps: u32, bitrate: u32, monitor: u32, profile: u32) -> Result<Self, RecorderError> {
         use crate::d3d11::D3D11TextureManager;
 
         // 检测显示器尺寸
         let (width, height) = D3D11TextureManager::detect_monitor(monitor)?;
-        println!("[H264Encoder] Detected monitor {}: {}x{}", monitor, width, height);
+        println!(
+            "[H264Encoder] Detected monitor {}: {}x{}",
+            monitor, width, height
+        );
 
         let params = H264EncodeParams {
             width,
@@ -1060,7 +1095,7 @@ impl H264Encoder {
             bitrate,
             profile,
         };
-        Self::new(params)
+        Self::from_params(params)
     }
 
     /// 启动编码器
@@ -1173,6 +1208,10 @@ impl Drop for H264Encoder {
             self.h264_encoder = None;
             unsafe {
                 let _ = MFShutdown();
+                if self.com_initialized {
+                    CoUninitialize();
+                    self.com_initialized = false;
+                }
             }
         }
     }

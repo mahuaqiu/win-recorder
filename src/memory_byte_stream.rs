@@ -3,16 +3,8 @@
 //! 用于 Media Foundation 内存输出，将编码数据直接写入内存缓冲区
 //! 替代临时文件方案
 
-use std::sync::Arc;
 use parking_lot::Mutex;
-
-#[cfg(windows)]
-use windows::{
-    core::*,
-    Win32::Foundation::*,
-    Win32::Media::MediaFoundation::*,
-    Win32::System::Com::*,
-};
+use std::sync::Arc;
 
 /// 内存字节流内部状态
 ///
@@ -86,15 +78,7 @@ impl MemoryByteStream {
         inner.is_valid
     }
 
-    /// 获取 COM 接口指针 (IMFByteStream)
-    ///
-    /// 使用 windows-implement 宏创建的对象会自动实现 ComInterface trait，
-    /// 可以通过 .cast() 方法转换为对应的 COM 接口类型
-    #[cfg(windows)]
-    pub fn as_raw(&self) -> windows::Win32::Media::MediaFoundation::IMFByteStream {
-        use windows::core::ComInterface;
-        self.cast().expect("MemoryByteStream 应该能转换为 IMFByteStream")
-    }
+    // 自定义 IMFByteStream 方案已废弃，当前推流模块直接从 MFT 输出 sample 读取数据。
 }
 
 impl Default for MemoryByteStream {
@@ -103,188 +87,25 @@ impl Default for MemoryByteStream {
     }
 }
 
-#[cfg(windows)]
-#[implement(IMFByteStream)]
-impl MemoryByteStream {
-    /// 获取字节流能力
-    ///
-    /// 支持读取、写入和查找
-    fn GetCapabilities(&self) -> Result<u32> {
-        // MFBYTESTREAM_IS_SEEKABLE | MFBYTESTREAM_IS_READABLE | MFBYTESTREAM_IS_WRITABLE
-        Ok(MFBYTESTREAM_IS_SEEKABLE.0 | MFBYTESTREAM_IS_READABLE.0 | MFBYTESTREAM_IS_WRITABLE.0)
-    }
-
-    /// 获取流长度
-    fn GetLength(&self) -> Result<u64> {
-        let inner = self.inner.lock();
-        Ok(inner.buffer.len() as u64)
-    }
-
-    /// 设置流长度（本实现不支持扩展或截断）
-    fn SetLength(&self, _qwlength: u64) -> Result<()> {
-        // 不支持设置长度，直接返回成功
-        Ok(())
-    }
-
-    /// 获取当前读取/写入位置
-    fn GetCurrentPosition(&self) -> Result<u64> {
-        let inner = self.inner.lock();
-        Ok(inner.position)
-    }
-
-    /// 设置当前读取/写入位置
-    fn SetCurrentPosition(&self, qwposition: u64) -> Result<()> {
-        let mut inner = self.inner.lock();
-        inner.position = qwposition;
-        Ok(())
-    }
-
-    /// 检查是否到达流末尾
-    fn IsEndOfStream(&self) -> Result<BOOL> {
-        let inner = self.inner.lock();
-        Ok(BOOL::from(inner.position >= inner.buffer.len() as u64))
-    }
-
-    /// 读取数据
-    ///
-    /// 从当前 position 读取最多 cb 字节的数据
-    fn Read(&self, pb: *mut u8, cb: u32, pcbread: *mut u32) -> Result<()> {
-        if pb.is_null() || pcbread.is_null() {
-            return Err(E_POINTER.into());
-        }
-
-        let mut inner = self.inner.lock();
-
-        // 先检查 position 是否超出 buffer 长度，避免整数溢出
-        let buffer_len = inner.buffer.len() as u64;
-        let pos = inner.position;
-        if pos >= buffer_len {
-            unsafe { *pcbread = 0; }
-            return Ok(());
-        }
-        let available = (buffer_len - pos) as u32;
-        let to_read = cb.min(available);
-
-        if to_read > 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    inner.buffer.as_ptr().add(pos as usize),
-                    pb,
-                    to_read as usize,
-                );
-            }
-            inner.position += to_read as u64;
-        }
-
-        unsafe { *pcbread = to_read; }
-        Ok(())
-    }
-
-    /// 写入数据
-    ///
-    /// 从当前位置写入数据
-    fn Write(&self, pb: *const u8, cb: u32) -> Result<u32> {
-        if pb.is_null() {
-            return Err(E_POINTER.into());
-        }
-
-        let mut inner = self.inner.lock();
-
-        if inner.position < inner.buffer.len() as u64 {
-            // 覆盖模式：当前位置在已有数据范围内
-            let overwrite_len = (cb as usize).min(inner.buffer.len() - inner.position as usize);
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    pb,
-                    inner.buffer.as_mut_ptr().add(inner.position as usize),
-                    overwrite_len,
-                );
-            }
-            inner.position += overwrite_len as u64;
-
-            // 如果写入的数据超过现有数据范围，需要追加剩余部分
-            if cb > overwrite_len as u32 {
-                let remaining_offset = overwrite_len;
-                unsafe {
-                    let remaining_slice = std::slice::from_raw_parts(
-                        pb.add(remaining_offset),
-                        (cb as usize) - remaining_offset,
-                    );
-                    inner.buffer.extend_from_slice(remaining_slice);
-                }
-                inner.position += (cb - overwrite_len as u32) as u64;
-            }
-
-            return Ok(cb);
-        }
-
-        // 追加模式：当前位置在缓冲区末尾
-        unsafe {
-            let slice = std::slice::from_raw_parts(pb, cb as usize);
-            inner.buffer.extend_from_slice(slice);
-        }
-        inner.position += cb as u64;
-        Ok(cb)
-    }
-
-    /// 查找操作
-    fn Seek(&self, seekorigin: MFBYTESTREAM_SEEK_ORIGIN, llseekoffset: i64, _dwseekflags: u32) -> Result<u64> {
-        let mut inner = self.inner.lock();
-
-        let new_pos = match seekorigin.0 {
-            0 => { // Begin
-                llseekoffset.max(0) as u64
-            }
-            1 => { // Current
-                (inner.position as i64 + llseekoffset).max(0) as u64
-            }
-            2 => { // End
-                (inner.buffer.len() as i64 + llseekoffset).max(0) as u64
-            }
-            _ => inner.position,
-        };
-
-        inner.position = new_pos.min(inner.buffer.len() as u64);
-        Ok(inner.position)
-    }
-
-    /// 刷新数据（本实现无需刷新操作）
-    fn Flush(&self) -> Result<()> {
-        Ok(())
-    }
-
-    /// 关闭字节流
-    fn Close(&self) -> Result<()> {
-        let mut inner = self.inner.lock();
-        inner.is_valid = false;
-        Ok(())
-    }
-
-    // 异步方法 - 本实现不支持异步操作，返回 E_NOTIMPL
-    fn BeginRead(&self, _pb: *mut u8, _cb: u32, _pcallback: Option<&IMFAsyncCallback>, _punkstate: Option<&IUnknown>) -> Result<()> {
-        Err(E_NOTIMPL.into())
-    }
-
-    fn EndRead(&self, _presult: Option<&IMFAsyncResult>) -> Result<u32> {
-        Err(E_NOTIMPL.into())
-    }
-
-    fn BeginWrite(&self, _pb: *const u8, _cb: u32, _pcallback: Option<&IMFAsyncCallback>, _punkstate: Option<&IUnknown>) -> Result<()> {
-        Err(E_NOTIMPL.into())
-    }
-
-    fn EndWrite(&self, _presult: Option<&IMFAsyncResult>) -> Result<u32> {
-        Err(E_NOTIMPL.into())
-    }
-}
-
-// 由于 IMFByteStream 接口非常复杂，需要实现大量方法
-// 这里提供一个简化方案：使用 MFCreateMemoryBuffer 替代自定义 ByteStream
-// 然后从内存缓冲区读取编码数据
+// 自定义 IMFByteStream 接口非常复杂，当前保留 MemoryByteStream 的普通内存缓冲能力，
+// H264 推流则使用 MFCreateMemoryBuffer 并直接读取编码器输出 sample。
 
 /// 从内存缓冲区提取 NAL 单元
 #[allow(dead_code)]
 pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
+    if has_annex_b_start_code(data) {
+        return extract_annex_b_nal_units(data);
+    }
+
+    extract_length_prefixed_nal_units(data)
+}
+
+fn has_annex_b_start_code(data: &[u8]) -> bool {
+    data.windows(3).any(|w| w == [0x00, 0x00, 0x01])
+        || data.windows(4).any(|w| w == [0x00, 0x00, 0x00, 0x01])
+}
+
+fn extract_annex_b_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
     let mut nal_units = Vec::new();
 
     if data.len() < 5 {
@@ -298,10 +119,10 @@ pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
         // 检测 4 字节起始码: 0x00 0x00 0x00 0x01
         if i + 4 <= data.len()
             && data[i] == 0x00
-            && data[i+1] == 0x00
-            && data[i+2] == 0x00
-            && data[i+3] == 0x01 {
-
+            && data[i + 1] == 0x00
+            && data[i + 2] == 0x00
+            && data[i + 3] == 0x01
+        {
             if let Some(start) = start_idx {
                 if start < i {
                     nal_units.push(data[start..i].to_vec());
@@ -310,10 +131,7 @@ pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
             start_idx = Some(i + 4);
         }
         // 检测 3 字节起始码: 0x00 0x00 0x01
-        else if data[i] == 0x00
-            && data[i+1] == 0x00
-            && data[i+2] == 0x01 {
-
+        else if data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01 {
             if let Some(start) = start_idx {
                 if start < i {
                     nal_units.push(data[start..i].to_vec());
@@ -331,6 +149,34 @@ pub fn extract_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
     }
 
     nal_units
+}
+
+fn extract_length_prefixed_nal_units(data: &[u8]) -> Vec<Vec<u8>> {
+    let mut nal_units = Vec::new();
+    let mut offset = 0usize;
+
+    while offset + 4 <= data.len() {
+        let nal_len = u32::from_be_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
+        offset += 4;
+
+        if nal_len == 0 || offset + nal_len > data.len() {
+            return Vec::new();
+        }
+
+        nal_units.push(data[offset..offset + nal_len].to_vec());
+        offset += nal_len;
+    }
+
+    if offset == data.len() {
+        nal_units
+    } else {
+        Vec::new()
+    }
 }
 
 /// 检测 NAL 单元类型
@@ -378,12 +224,33 @@ mod tests {
         // 模拟 H.264 比特流，包含 SPS、PPS 和一个 IDR 帧
         let data = vec![
             0x00, 0x00, 0x00, 0x01, 0x67, 0x42, 0x00, 0x1E, 0x00, // SPS
-            0x00, 0x00, 0x00, 0x01, 0x68, 0x00, 0xF8,             // PPS
-            0x00, 0x00, 0x00, 0x01, 0x65, 0x41, 0xFF, 0xFF,       // IDR
+            0x00, 0x00, 0x00, 0x01, 0x68, 0x00, 0xF8, // PPS
+            0x00, 0x00, 0x00, 0x01, 0x65, 0x41, 0xFF, 0xFF, // IDR
         ];
 
         let nal_units = extract_nal_units(&data);
         assert!(nal_units.len() >= 2);
+    }
+
+    #[test]
+    fn test_extract_length_prefixed_nal_units() {
+        let data = vec![
+            0x00, 0x00, 0x00, 0x04, 0x67, 0x42, 0x00, 0x1E, 0x00, 0x00, 0x00, 0x03, 0x68, 0x00,
+            0xF8,
+        ];
+
+        let nal_units = extract_nal_units(&data);
+
+        assert_eq!(nal_units.len(), 2);
+        assert_eq!(nal_units[0], vec![0x67, 0x42, 0x00, 0x1E]);
+        assert_eq!(nal_units[1], vec![0x68, 0x00, 0xF8]);
+    }
+
+    #[test]
+    fn test_reject_invalid_length_prefixed_nal_units() {
+        let data = vec![0x00, 0x00, 0x00, 0x10, 0x67];
+
+        assert!(extract_nal_units(&data).is_empty());
     }
 
     #[test]
