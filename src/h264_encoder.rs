@@ -131,6 +131,8 @@ pub struct H264Encoder {
     encoder_input_id: u32,
     /// 输出流 ID（H264 编码器）
     encoder_output_id: u32,
+    /// 是否使用直接 RGB32 模式（不需要颜色转换器）
+    use_direct_mode: bool,
 }
 
 // 手动实现 Send trait，因为 IMFTransform 是 COM 对象
@@ -180,6 +182,7 @@ impl H264Encoder {
             color_output_id: 0,
             encoder_input_id: 0,
             encoder_output_id: 0,
+            use_direct_mode: false,
         })
     }
 
@@ -210,18 +213,39 @@ impl H264Encoder {
             MFStartup(MFSTARTUP_LITE, 0)
                 .map_err(|e| RecorderError::MFError(format!("MFStartup 失败: {}", e)))?;
 
-            // 1. 创建颜色转换 MFT
-            let color_converter = self.create_color_converter()?;
-            self.color_converter = Some(color_converter);
-
-            // 2. 创建 H264 编码 MFT
+            // 先尝试直接模式：只创建编码器，尝试让编码器直接接受 RGB32 输入
+            // 步骤 1: 创建 H264 编码 MFT
             let h264_encoder = self.create_h264_encoder()?;
             self.h264_encoder = Some(h264_encoder);
 
-            // 3. 配置 MFT 管线的媒体类型
-            self.configure_pipeline()?;
+            // 步骤 2: 尝试直接配置 RGB32 输入（不需要颜色转换器）
+            match self.try_configure_direct_rgb32() {
+                Ok(_) => {
+                    // 直接模式成功！编码器可以直接接受 RGB32
+                    self.use_direct_mode = true;
+                    println!("[H264Encoder] 使用直接 RGB32 模式（编码器内置颜色转换）");
+                }
+                Err(e) => {
+                    // 直接模式失败，回退到传统模式（需要颜色转换器）
+                    println!("[H264Encoder] 直接 RGB32 模式失败: {}，回退到颜色转换模式", e);
+                    self.h264_encoder = None;
+                    
+                    // 重新创建编码器
+                    let h264_encoder = self.create_h264_encoder()?;
+                    self.h264_encoder = Some(h264_encoder);
+                    
+                    // 创建颜色转换器
+                    let color_converter = self.create_color_converter()?;
+                    self.color_converter = Some(color_converter);
+                    
+                    // 配置传统管线
+                    self.configure_pipeline()?;
+                    
+                    self.use_direct_mode = false;
+                }
+            }
 
-            // 4. 发送开始流消息
+            // 发送开始流消息
             self.send_stream_messages()?;
 
             self.initialized = true;
@@ -296,33 +320,42 @@ impl H264Encoder {
             // 1. 创建输入 IMFSample
             let input_sample = self.create_bgra_sample(bgra_data)?;
 
-            // 2. 送入颜色转换器
-            let color_converter = self
-                .color_converter
-                .as_ref()
-                .ok_or(RecorderError::NotRecording)?;
-
-            color_converter
-                .ProcessInput(self.color_input_id, &input_sample, 0)
-                .map_err(|e| {
-                    RecorderError::MFError(format!("颜色转换器 ProcessInput 失败: {}", e))
-                })?;
-
-            // 3. 从颜色转换器获取 NV12 输出
-            let nv12_samples = self.process_color_converter_output()?;
-
-            // 4. 将 NV12 数据送入 H264 编码器
             let encoder = self
                 .h264_encoder
                 .as_ref()
                 .ok_or(RecorderError::NotRecording)?;
 
-            for nv12_sample in &nv12_samples {
+            if self.use_direct_mode {
+                // 直接模式：RGB32 -> H264 编码器（编码器内置颜色转换）
                 encoder
-                    .ProcessInput(self.encoder_input_id, nv12_sample, 0)
+                    .ProcessInput(self.encoder_input_id, &input_sample, 0)
                     .map_err(|e| {
-                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e))
+                        RecorderError::MFError(format!("H264 编码器 ProcessInput 失败(直接模式): {}", e))
                     })?;
+            } else {
+                // 传统模式：RGB32 -> 颜色转换器 -> NV12 -> H264 编码器
+                let color_converter = self
+                    .color_converter
+                    .as_ref()
+                    .ok_or(RecorderError::NotRecording)?;
+
+                color_converter
+                    .ProcessInput(self.color_input_id, &input_sample, 0)
+                    .map_err(|e| {
+                        RecorderError::MFError(format!("颜色转换器 ProcessInput 失败: {}", e))
+                    })?;
+
+                // 3. 从颜色转换器获取 NV12 输出
+                let nv12_samples = self.process_color_converter_output()?;
+
+                // 4. 将 NV12 数据送入 H264 编码器
+                for nv12_sample in &nv12_samples {
+                    encoder
+                        .ProcessInput(self.encoder_input_id, nv12_sample, 0)
+                        .map_err(|e| {
+                            RecorderError::MFError(format!("H264 编码器 ProcessInput 失败: {}", e))
+                        })?;
+                }
             }
 
             // 5. 从 H264 编码器获取编码输出
@@ -365,19 +398,21 @@ impl H264Encoder {
         let mut remaining_frames = Vec::new();
 
         unsafe {
-            // 1. 发送 Drain 消息给颜色转换器
-            if let Some(color_converter) = &self.color_converter {
-                let _ = color_converter.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
+            // 1. 发送 Drain 消息（直接模式不需要给颜色转换器发）
+            if !self.use_direct_mode {
+                if let Some(color_converter) = &self.color_converter {
+                    let _ = color_converter.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0);
 
-                // 获取剩余输出
-                if let Ok(frames) = self.process_color_converter_output() {
-                    let encoder = self
-                        .h264_encoder
-                        .as_ref()
-                        .ok_or(RecorderError::NotRecording)?;
+                    // 获取剩余输出
+                    if let Ok(frames) = self.process_color_converter_output() {
+                        let encoder = self
+                            .h264_encoder
+                            .as_ref()
+                            .ok_or(RecorderError::NotRecording)?;
 
-                    for nv12_sample in &frames {
-                        let _ = encoder.ProcessInput(self.encoder_input_id, nv12_sample, 0);
+                        for nv12_sample in &frames {
+                            let _ = encoder.ProcessInput(self.encoder_input_id, nv12_sample, 0);
+                        }
                     }
                 }
             }
@@ -453,6 +488,57 @@ impl H264Encoder {
         Ok(encoder)
     }
 
+    /// 尝试直接配置 RGB32 输入（不需要颜色转换器）
+    ///
+    /// 有些 H.264 编码器 MFT 内置了颜色转换功能，可以直接接受 RGB32 输入。
+    /// 这个方法尝试配置编码器直接接收 RGB32，如果成功则使用直接模式。
+    unsafe fn try_configure_direct_rgb32(&mut self) -> Result<(), RecorderError> {
+        let encoder = self
+            .h264_encoder
+            .as_ref()
+            .ok_or_else(|| RecorderError::MFError("编码器未创建".into()))?;
+
+        // 获取流 ID
+        self.encoder_input_id = self.get_input_stream_id(encoder)?;
+        self.encoder_output_id = self.get_output_stream_id(encoder)?;
+
+        // 1. 配置编码器的输入类型为 RGB32
+        let input_type = self.create_rgb32_media_type()?;
+        encoder
+            .SetInputType(self.encoder_input_id, &input_type, 0)
+            .map_err(|e| RecorderError::MFError(format!("设置编码器 RGB32 输入类型失败: {}", e)))?;
+
+        // 2. 配置编码器的输出类型为 H264
+        let output_type = self.create_h264_media_type()?;
+        encoder
+            .SetOutputType(self.encoder_output_id, &output_type, 0)
+            .map_err(|e| RecorderError::MFError(format!("设置编码器 H264 输出类型失败: {}", e)))?;
+
+        // 3. 通知开始流
+        encoder
+            .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+            .map_err(|e| {
+                RecorderError::MFError(format!("编码器 START_OF_STREAM 失败: {}", e))
+            })?;
+
+        // 4. 通知开始流媒体
+        encoder
+            .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+            .map_err(|e| {
+                RecorderError::MFError(format!("编码器 BEGIN_STREAMING 失败: {}", e))
+            })?;
+
+        // 尝试获取 SPS/PPS
+        self.extract_sps_pps_from_attributes()?;
+
+        println!(
+            "[H264Encoder] 直接 RGB32 模式配置成功: {}x{} @ {}fps",
+            self.params.width, self.params.height, self.params.fps
+        );
+
+        Ok(())
+    }
+
     /// 配置 MFT 管线的媒体类型
     ///
     /// 管线: RGB32 -> [颜色转换] -> NV12 -> [H264编码] -> H264
@@ -501,39 +587,44 @@ impl H264Encoder {
 
     /// 发送流控制消息
     unsafe fn send_stream_messages(&self) -> Result<(), RecorderError> {
-        let color_converter = self
-            .color_converter
-            .as_ref()
-            .ok_or_else(|| RecorderError::MFError("颜色转换器未创建".into()))?;
         let h264_encoder = self
             .h264_encoder
             .as_ref()
             .ok_or_else(|| RecorderError::MFError("H264 编码器未创建".into()))?;
 
-        // 通知开始流
-        color_converter
-            .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
-            .map_err(|e| {
-                RecorderError::MFError(format!("颜色转换器 START_OF_STREAM 失败: {}", e))
-            })?;
+        // 直接模式不需要发送消息给颜色转换器
+        if !self.use_direct_mode {
+            let color_converter = self
+                .color_converter
+                .as_ref()
+                .ok_or_else(|| RecorderError::MFError("颜色转换器未创建".into()))?;
 
+            // 通知颜色转换器开始流
+            color_converter
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+                .map_err(|e| {
+                    RecorderError::MFError(format!("颜色转换器 START_OF_STREAM 失败: {}", e))
+                })?;
+
+            color_converter
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+                .map_err(|e| {
+                    RecorderError::MFError(format!("颜色转换器 BEGIN_STREAMING 失败: {}", e))
+                })?;
+        }
+
+        // 通知 H264 编码器开始流
         h264_encoder
             .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
             .map_err(|e| {
                 RecorderError::MFError(format!("H264 编码器 START_OF_STREAM 失败: {}", e))
             })?;
 
-        // 通知开始流处理
-        color_converter
-            .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
-            .map_err(|e| {
-                RecorderError::MFError(format!("颜色转换器 BEGIN_STREAMING 失败: {}", e))
-            })?;
-
         h264_encoder
             .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
             .map_err(|e| {
                 RecorderError::MFError(format!("H264 编码器 BEGIN_STREAMING 失败: {}", e))
+            }
             })?;
 
         println!("[H264Encoder] 流控制消息已发送");
