@@ -28,7 +28,7 @@ use windows::Win32::System::Com::*;
 ///
 /// 这是 Windows 内置的 H.264 编码器 Media Foundation Transform
 /// GUID: {6CA50344-051A-4DED-9779-A43305165E35}
-const CLSID_CMSH264EncoderMFT: GUID = GUID::from_values(
+const CLSID_MSH264_ENCODER_MFT: GUID = GUID::from_values(
     0x6CA50344,
     0x051A,
     0x4DED,
@@ -38,7 +38,7 @@ const CLSID_CMSH264EncoderMFT: GUID = GUID::from_values(
 /// 颜色转换器 MFT 的 CLSID
 ///
 /// GUID: {98230571-0087-420E-B7A0-BC85D1E8B02E}
-const CLSID_CColorConvertDMO: GUID = GUID::from_values(
+const CLSID_COLOR_CONVERTER_DMO: GUID = GUID::from_values(
     0x98230571,
     0x0087,
     0x420E,
@@ -436,7 +436,7 @@ impl H264Encoder {
     /// 创建颜色转换 MFT
     unsafe fn create_color_converter(&self) -> Result<IMFTransform, RecorderError> {
         let converter: IMFTransform =
-            CoCreateInstance(&CLSID_CColorConvertDMO, None, CLSCTX_INPROC_SERVER)
+            CoCreateInstance(&CLSID_COLOR_CONVERTER_DMO, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| RecorderError::MFError(format!("创建颜色转换 MFT 失败: {}", e)))?;
 
         println!("[H264Encoder] 颜色转换 MFT 创建成功");
@@ -446,7 +446,7 @@ impl H264Encoder {
     /// 创建 H264 编码 MFT
     unsafe fn create_h264_encoder(&self) -> Result<IMFTransform, RecorderError> {
         let encoder: IMFTransform =
-            CoCreateInstance(&CLSID_CMSH264EncoderMFT, None, CLSCTX_INPROC_SERVER)
+            CoCreateInstance(&CLSID_MSH264_ENCODER_MFT, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| RecorderError::MFError(format!("创建 H264 编码 MFT 失败: {}", e)))?;
 
         println!("[H264Encoder] H264 编码 MFT 创建成功");
