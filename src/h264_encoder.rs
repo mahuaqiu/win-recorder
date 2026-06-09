@@ -37,12 +37,12 @@ const CLSID_MSH264_ENCODER_MFT: GUID = GUID::from_values(
 
 /// 颜色转换器 MFT 的 CLSID
 ///
-/// GUID: {98230571-0087-420E-B7A0-BC85D1E8B02E}
-const CLSID_COLOR_CONVERTER_DMO: GUID = GUID::from_values(
-    0x98230571,
-    0x0087,
-    0x420E,
-    [0xB7, 0xA0, 0xBC, 0x85, 0xD1, 0xE8, 0xB0, 0x2E],
+/// GUID: {32e26c42-8a22-11d0-9b6d-0000c0c95a5c}
+const CLSID_CCOLORCONVERTERDLL: GUID = GUID::from_values(
+    0x32e26c42,
+    0x8a22,
+    0x11d0,
+    [0x9b, 0x6d, 0x00, 0x00, 0xc0, 0xc9, 0x5a, 0x5c],
 );
 
 /// H264 编码参数
@@ -436,7 +436,7 @@ impl H264Encoder {
     /// 创建颜色转换 MFT
     unsafe fn create_color_converter(&self) -> Result<IMFTransform, RecorderError> {
         let converter: IMFTransform =
-            CoCreateInstance(&CLSID_COLOR_CONVERTER_DMO, None, CLSCTX_INPROC_SERVER)
+            CoCreateInstance(&CLSID_CCOLORCONVERTERDLL, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| RecorderError::MFError(format!("创建颜色转换 MFT 失败: {}", e)))?;
 
         println!("[H264Encoder] 颜色转换 MFT 创建成功");
