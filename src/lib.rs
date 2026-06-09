@@ -1,3 +1,4 @@
+mod bgra_to_nv12;
 mod d3d11;
 mod error;
 mod h264_encoder;
