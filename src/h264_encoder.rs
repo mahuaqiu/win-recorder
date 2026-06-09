@@ -27,16 +27,13 @@ use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 use windows::Win32::Media::MediaFoundation::*;
 use windows::Win32::System::Com::*;
 
-// MFT 消息：设置 D3D 管理器（让硬件编码器可以接受 D3D11 纹理输入）
-const MFT_MESSAGE_SET_D3D_MANAGER: u32 = 0x1; // 实际值需要查文档
-
 /// CMSH264EncoderMFT 的 CLSID
 ///
 /// 这是 Windows 内置的 H.264 编码器 Media Foundation Transform
 /// GUID: {6CA50344-051A-4DED-9779-A43305165E35}
 /// H264 硬件编码器 CLSID
 ///
-/// 这是 Windows 内置的硬件 H.264 编码器，需要 D3D11 支持
+/// Windows H.264 编码器
 /// CLSID: {6CA50344-051A-4DED-9779-A43305165E35}
 const CLSID_MSH264_ENCODER_MFT: GUID = GUID::from_values(
     0x6CA50344,
@@ -424,8 +421,7 @@ impl H264Encoder {
         self.encoder_input_id = self.get_input_stream_id(h264_encoder)?;
         self.encoder_output_id = self.get_output_stream_id(h264_encoder)?;
 
-        // 4. 配置 H264 编码器的输入类型 (NV12) - 使用硬件加速
-        // 如果前面成功注册了 D3D11 设备，这里应该可以接受 NV12
+        // 1. 配置 H264 编码器的输入类型 (NV12)
         let nv12_type = self.create_nv12_media_type()?;
         h264_encoder
             .SetInputType(self.encoder_input_id, &nv12_type, 0)
@@ -449,7 +445,8 @@ impl H264Encoder {
             .SetOutputType(self.encoder_output_id, &h264_type, 0)
             .map_err(|e| RecorderError::MFError(format!("设置 H264 编码器输出类型失败: {}", e)))?;
 
-        println!("[H264Encoder] MFT 管线配置完成: NV12 -> H264 (D3D11 加速)");
+        println!("[H264Encoder] MFT 管线配置完成: {} -> H264", 
+            if self.use_cpu_mode { "IYUV (CPU)" } else { "NV12" });
         Ok(())
     }
 
