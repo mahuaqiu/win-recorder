@@ -1,6 +1,6 @@
 [package]
 name = "win-recorder"
-version = "0.7.1"
+version = "0.7.4"
 edition = "2021"
 
 [lib]
@@ -23,6 +23,7 @@ windows = { version = "0.58", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_SystemServices",
+    "Win32_System_Variant",
 ] }
 anyhow = "1.0"
 thiserror = "1.0"
