@@ -49,23 +49,24 @@ Python BGRA → upload_bgra() [写入 staging 纹理]
 
 ```rust
 /// 水印渲染器
-/// 内置等宽点阵字体，直接操作 BGRA 像素数据
+/// 内置等宽点阵字体，直接操作 D3D11 staging 纹理
 pub struct WatermarkRenderer { ... }
 
 impl WatermarkRenderer {
     /// 创建水印渲染器
     pub fn new() -> Self;
 
-    /// 渲染时间水印到 BGRA 像素数据
+    /// 在 staging 纹理上绘制时间水印
     ///
     /// # 参数
-    /// - buffer: BGRA 像素数据的可变引用
+    /// - staging_texture: D3D11 staging 纹理（需要用 MAP_READ_WRITE 映射）
     /// - width: 帧宽度（像素）
     /// - height: 帧高度（像素）
     ///
     /// # 说明
     /// 在左下角 (20, height - 20 - font_height) 位置绘制时间
-    pub fn render(&self, buffer: &mut [u8], width: u32, height: u32);
+    /// 需要先 Map 纹理为 READ_WRITE，获取 BGRA 像素指针后绘制
+    pub fn render_on_texture(&self, context: &ID3D11DeviceContext, staging_texture: &ID3D11Texture2D, width: u32, height: u32);
 }
 ```
 
@@ -74,57 +75,57 @@ impl WatermarkRenderer {
 - **字符集**：0-9、:、. 共 12 个字符
 - **字号**：每个字符 8×16 像素（宽×高）
 - **颜色**：白色 (B=255, G=255, R=255, A=255)
-- **格式**：编译时内嵌的常量数组 `[[u8; 16]; 8]`（每个字符 8 字节宽，每字节是一行 8 像素的位图）
+- **格式**：每个字符 16 行，每行 1 字节（8 像素）的位图
 
-示例：数字 "0" 的点阵（8×16）：
+示例：数字 "0" 的点阵（8×16，共 16 字节）：
 
 ```rust
-const CHAR_0: [[u8; 2]; 16] = [
-    [0x00, 0x00], // 行 0: 空
-    [0x00, 0x00],
-    [0x3C, 0x00], // ████
-    [0x66, 0x00], // ██  ██
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x66, 0x00],
-    [0x3C, 0x00], // ████
-    [0x00, 0x00],
-    [0x00, 0x00],
+// 16 行，每行 1 字节（8 像素），高位在左
+const CHAR_0: [u8; 16] = [
+    0x00, // 行 0: ........ (全空)
+    0x00, // 行 1: ........
+    0x3C, // 行 2: ..XXXX.. (0x3C = 00111100)
+    0x66, // 行 3: .XX..XX. (0x66 = 01100110)
+    0x66, // 行 4: .XX..XX.
+    0x66, // 行 5: .XX..XX.
+    0x66, // 行 6: .XX..XX.
+    0x66, // 行 7: .XX..XX.
+    0x66, // 行 8: .XX..XX.
+    0x66, // 行 9: .XX..XX.
+    0x66, // 行 10: .XX..XX.
+    0x66, // 行 11: .XX..XX.
+    0x66, // 行 12: .XX..XX.
+    0x3C, // 行 13: ..XXXX..
+    0x00, // 行 14: ........
+    0x00, // 行 15: ........
 ];
 // ... 类似定义 1-9 : .
 ```
 
 #### 3.1.2 时间获取与格式化
 
-使用 `std::time::SystemTime` 获取本地时间：
+使用 Windows API `GetLocalTime` 获取系统本地时间：
 
 ```rust
-use std::time::{SystemTime, UNIX_EPOCH};
+use windows::Win32::Foundation::SYSTEMTIME;
 
 fn get_current_time_string() -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap();
-    
-    // 转换为本地时间（使用 chrono 或手动计算时区偏移）
-    // 这里简化处理，假设 UTC+8（后续可优化为真正的本地时间）
-    let secs = now.as_secs() + 8 * 3600;
-    let hours = (secs / 3600) % 24;
-    let minutes = (secs / 60) % 60;
-    let seconds = secs % 60;
-    let millis = now.subsec_millis();
-    
-    format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
+    unsafe {
+        let mut st = SYSTEMTIME::default();
+        windows::Win32::System::Time::GetLocalTime(&mut st);
+
+        format!(
+            "{:02}:{:02}:{:02}.{:03}",
+            st.wHour,
+            st.wMinute,
+            st.wSecond,
+            st.wMilliseconds
+        )
+    }
 }
 ```
 
-> **注意**：上述简化使用 UTC+8，实际应使用系统时区。可引入 `chrono` crate 或使用 Windows API `GetLocalTime`。
+> 使用 Windows API `GetLocalTime` 而非 `chrono`，避免引入额外依赖。
 
 ### 3.2 d3d11.rs — 纹理管理调整
 
@@ -188,8 +189,13 @@ pub fn write_frame(&mut self, frame_data: &Bound<'_, PyByteArray>) -> Result<(),
     // 如果开启水印，绘制水印到 staging 纹理
     if self.watermark {
         if let Some(renderer) = &self.watermark_renderer {
-            // 重新映射 staging 纹理并绘制水印
-            renderer.render_on_texture(texture_manager)?;
+            // 重新映射 staging 纹理为 READ_WRITE，并绘制水印
+            renderer.render_on_texture(
+                texture_manager.context(),
+                texture_manager.staging_texture(),
+                self.width,
+                self.height,
+            )?;
         }
     }
 
@@ -204,6 +210,8 @@ pub fn write_frame(&mut self, frame_data: &Bound<'_, PyByteArray>) -> Result<(),
     Ok(())
 }
 ```
+
+> **注意**：由于水印绘制需要读写 staging 纹理，`upload_bgra_to_staging()` 内部必须使用 `D3D11_MAP_READ_WRITE` 而非 `D3D11_MAP_WRITE`。
 
 ### 3.4 错误处理策略
 
@@ -287,7 +295,7 @@ self._win_recorder = win_recorder.WinRecorder(
 | `src/d3d11.rs` | 修改 | 拆分 upload_bgra，新增 copy_staging_to_gpu |
 | `src/recorder.rs` | 修改 | 新增 watermark 参数，write_frame 调用水印绘制 |
 | `src/lib.rs` | 修改 | watermark 参数注册 |
-| `Cargo.toml` | 修改 | 如需引入 chrono（用于本地时间），添加依赖 |
+| `Cargo.toml` | 无需修改 | 使用 Windows API 获取本地时间，无需额外依赖 |
 | `pyproject.toml` | 无需修改 | Python 参数自动映射 |
 | `D:\code\autotest\worker\screen\recorder.py` | 修改 | 传入 watermark=True |
 
@@ -296,14 +304,7 @@ self._win_recorder = win_recorder.WinRecorder(
 ## 8. 风险与限制
 
 1. **字体样式固定**：使用内置 8×16 点阵字体，无法更换字体
-2. **时区处理**：简化实现使用 UTC+8 固定偏移，后续可优化为系统真实时区
+2. **时区处理**：使用 Windows API `GetLocalTime` 获取准确的系统本地时间
 3. **最小分辨率**：帧尺寸小于 100×30 时跳过水印绘制
-4. **性能**：每帧额外一次纹理 Map/Unmap，预计增加 <1ms 延迟（720p 帧）
-
----
-
-## 9. 待定事项
-
-- [ ] 是否需要引入 `chrono` crate 获取准确的系统本地时间？
-  - 当前简化方案使用固定 UTC+8 偏移
-  - 如需精确本地时间，添加 `chrono = "0.4"` 依赖
+4. **性能**：每帧额外一次纹理 Map/Unmap（READ_WRITE），预计增加 <1ms 延迟（720p 帧）
+5. **D3D11 MAP 标志**：staging 纹理需要同时支持读写，使用 `D3D11_CPU_ACCESS_WRITE | D3D11_CPU_ACCESS_READ`
