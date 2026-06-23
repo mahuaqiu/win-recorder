@@ -31,7 +31,7 @@
 - Create: `src/watermark.rs`
 - Modify: `Cargo.toml` (添加 Windows feature)
 
-- [ ] **Step 1: 检查并更新 Cargo.toml 添加 Win32_System_Time feature**
+- [ ] **Step 1: 检查并更新 Cargo.toml 添加正确的 Windows feature**
 
 ```toml
 [dependencies.windows]
@@ -41,9 +41,11 @@ features = [
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi",
     "Win32_Media_MediaFoundation",
-    "Win32_System_Time",  # 添加此行以使用 GetLocalTime
+    "Win32_System_SystemInformation",  # 添加此行以使用 GetLocalTime
 ]
 ```
+
+> **注意**: `GetLocalTime` 在 `Win32_System_SystemInformation` feature 下，不是 `Win32_System_Time`
 
 - [ ] **Step 2: 创建 src/watermark.rs 文件**
 
@@ -53,7 +55,7 @@ features = [
 
 use windows::Win32::Foundation::SYSTEMTIME;
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::System::Time::GetLocalTime;
+use windows::Win32::System::SystemInformation::GetLocalTime;
 use crate::error::RecorderError;
 
 /// 水印渲染器
@@ -110,10 +112,9 @@ impl WatermarkRenderer {
     }
     
     /// 获取当前时间字符串 HH:MM:SS.mmm
-    pub fn get_time_string(&self) -> String {
+    pub fn get_time_string() -> String {
         unsafe {
-            let mut st = SYSTEMTIME::default();
-            GetLocalTime(&mut st);
+            let st = GetLocalTime();
             format!(
                 "{:02}:{:02}:{:02}.{:03}",
                 st.wHour,
@@ -161,7 +162,7 @@ impl WatermarkRenderer {
                 .map_err(|e| RecorderError::D3D11TextureError(format!("Map staging 失败: {}", e)))?;
             
             // 获取时间字符串
-            let time_str = self.get_time_string();
+            let time_str = Self::get_time_string();
             
             // 计算水印位置 (左下角，距边缘 20px)
             let margin = 20u32;
