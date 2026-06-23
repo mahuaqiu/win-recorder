@@ -126,7 +126,8 @@ impl WatermarkRenderer {
     }
     
     /// 绘制单个字符到 BGRA 缓冲区
-    fn draw_char(&self, buffer: *mut u8, row_pitch: usize, x: u32, y: u32, ch: char) {
+    fn draw_char(&self, buffer: *mut std::ffi::c_void, row_pitch: usize, x: u32, y: u32, ch: char) {
+        let buffer = buffer as *mut u8;  // 类型转换
         if let Some(idx) = self.get_char_index(ch) {
             let bitmap = &self.char_bitmaps[idx];
             for row in 0..16u32 {
@@ -209,8 +210,11 @@ git commit -m "feat: 添加时间水印渲染器 (watermark.rs)"
 
 ```rust
 /// 仅上传数据到 staging 纹理（不拷贝到 GPU）
+/// 注意：使用 D3D11_MAP_READ_WRITE 以便后续水印绘制可在同一 Map 周期内完成
 pub fn upload_bgra_to_staging(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
-    // ... 原有 upload_bgra 的 Map/拷贝/Unmap 逻辑
+    // 1. Map staging 纹理 (D3D11_MAP_READ_WRITE)
+    // 2. 拷贝数据到 staging
+    // 3. Unmap staging
 }
 
 /// 将 staging 纹理拷贝到 GPU 纹理  
