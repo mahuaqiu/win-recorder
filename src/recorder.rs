@@ -1,6 +1,7 @@
 use crate::d3d11::D3D11TextureManager;
 use crate::error::RecorderError;
 use crate::mf_writer::MFSinkWriter;
+use crate::watermark::WatermarkRenderer;
 use parking_lot::Mutex;
 use pyo3::prelude::*;
 use pyo3::types::PyByteArray;
@@ -22,6 +23,8 @@ pub struct WinRecorder {
     width: u32,
     height: u32,
     recording: bool,
+    watermark: bool,
+    watermark_renderer: Option<WatermarkRenderer>,
 }
 
 #[pymethods]
@@ -33,11 +36,18 @@ impl WinRecorder {
     /// - fps: 帧率（默认 30）
     /// - audio: 是否录制音频（默认 false，当前版本不支持音频）
     /// - monitor: 显示器选择（1=主屏幕 left=0，2=副屏幕，默认 1）
+    /// - watermark: 是否启用时间水印（默认 false）
     #[new]
-    #[pyo3(signature = (output_path, fps=30, audio=false, monitor=1))]
-    pub fn new(output_path: String, fps: u32, audio: bool, monitor: u32) -> Result<Self, RecorderError> {
+    #[pyo3(signature = (output_path, fps=30, audio=false, monitor=1, watermark=false))]
+    pub fn new(output_path: String, fps: u32, audio: bool, monitor: u32, watermark: bool) -> Result<Self, RecorderError> {
         // 检测显示器尺寸
         let (width, height) = D3D11TextureManager::detect_monitor(monitor)?;
+
+        let watermark_renderer = if watermark {
+            Some(WatermarkRenderer::new())
+        } else {
+            None
+        };
 
         Ok(Self {
             texture_manager: None,
@@ -49,6 +59,8 @@ impl WinRecorder {
             width,
             height,
             recording: false,
+            watermark,
+            watermark_renderer,
         })
     }
 
@@ -121,8 +133,27 @@ impl WinRecorder {
         // 获取帧数据（零拷贝）
         let frame_bytes = unsafe { frame_data.as_bytes() };
 
-        // 上传到纹理
-        texture_manager.upload_bgra(frame_bytes)?;
+        // 上传到 staging（不拷贝到 GPU）
+        texture_manager.upload_bgra_to_staging(frame_bytes)?;
+
+        // 如果开启水印，绘制水印到 staging 纹理
+        // 水印绘制失败不中断录制，只记录警告
+        if self.watermark {
+            if let Some(renderer) = &self.watermark_renderer {
+                if let Err(e) = renderer.render(
+                    texture_manager.context(),
+                    texture_manager.staging_texture(),
+                    self.width,
+                    self.height,
+                ) {
+                    // 水印绘制失败，记录警告但不中断录制
+                    eprintln!("警告: 水印绘制失败: {}", e);
+                }
+            }
+        }
+
+        // 拷贝 staging 到 GPU
+        texture_manager.copy_staging_to_gpu();
 
         // 创建 MF Sample
         let sample = texture_manager.create_mf_sample()?;

@@ -1,3 +1,4 @@
+mod watermark;
 mod bgra_to_nv12;
 pub use bgra_to_nv12::{bgra_to_nv12, bgra_to_iyuv};
 mod d3d11;

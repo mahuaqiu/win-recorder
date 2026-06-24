@@ -135,14 +135,15 @@ impl D3D11TextureManager {
         }
     }
 
-    /// 上传 BGRA 帧数据到 Staging 纹理
+    /// 仅上传 BGRA 帧数据到 Staging 纹理（不拷贝到 GPU）
     ///
     /// # 参数
     /// - frame_data: BGRA 格式的帧数据（每像素 4 字节）
     ///
     /// # 说明
-    /// 使用 Map/Unmap 将数据拷贝到 Staging 纹理
-    pub fn upload_bgra(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
+    /// 仅上传数据到 staging 纹理（不拷贝到 GPU）
+    /// 注意：使用 D3D11_MAP_READ_WRITE 以便后续水印绘制可以单独 Map 此纹理
+    pub fn upload_bgra_to_staging(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
         unsafe {
             let expected_size = (self.width * self.height * 4) as usize;
             if frame_data.len() != expected_size {
@@ -152,13 +153,13 @@ impl D3D11TextureManager {
                 });
             }
 
-            // 映射 Staging 纹理
+            // 映射 Staging 纹理（READ_WRITE 以便后续水印绘制可在同一 Map 周期内完成）
             let mut mapped_resource = D3D11_MAPPED_SUBRESOURCE::default();
             self.context
                 .Map(
                     &self.staging_texture,
                     0,
-                    D3D11_MAP_WRITE,
+                    D3D11_MAP_READ_WRITE,
                     0,
                     Some(&mut mapped_resource),
                 )
@@ -184,12 +185,35 @@ impl D3D11TextureManager {
             // 解除映射
             self.context.Unmap(&self.staging_texture, 0);
 
-            // 从 Staging 拷贝到 GPU 纹理
-            self.context
-                .CopyResource(&self.gpu_texture, &self.staging_texture);
-
             Ok(())
         }
+    }
+
+    /// 将 Staging 纹理拷贝到 GPU 纹理
+    pub fn copy_staging_to_gpu(&self) {
+        unsafe {
+            self.context
+                .CopyResource(&self.gpu_texture, &self.staging_texture);
+        }
+    }
+
+    /// 上传 BGRA 帧数据到 GPU 纹理（原有兼容性方法）
+    ///
+    /// # 参数
+    /// - frame_data: BGRA 格式的帧数据（每像素 4 字节）
+    ///
+    /// # 说明
+    /// 此方法保持向后兼容，内部调用 upload_bgra_to_staging + copy_staging_to_gpu。
+    /// 如需在上传后绘制水印，请使用拆分后的方法：
+    /// ```ignore
+    /// manager.upload_bgra_to_staging(frame_data)?;
+    /// // 在 staging 纹理上绘制水印 ...
+    /// manager.copy_staging_to_gpu();
+    /// ```
+    pub fn upload_bgra(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
+        self.upload_bgra_to_staging(frame_data)?;
+        self.copy_staging_to_gpu();
+        Ok(())
     }
 
     /// 创建 Media Foundation Sample（使用内存缓冲区）
@@ -359,6 +383,16 @@ impl D3D11TextureManager {
     #[allow(dead_code)]
     pub fn height(&self) -> u32 {
         self.height
+    }
+
+    /// 获取 D3D11 设备上下文（用于水印绘制）
+    pub fn context(&self) -> &ID3D11DeviceContext {
+        &self.context
+    }
+
+    /// 获取 Staging 纹理（用于水印绘制）
+    pub fn staging_texture(&self) -> &ID3D11Texture2D {
+        &self.staging_texture
     }
 
     /// 获取 D3D11 设备
