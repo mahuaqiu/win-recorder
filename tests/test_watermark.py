@@ -31,10 +31,11 @@ aligned_height = recorder.height
 print(f"对齐后分辨率: {aligned_width} x {aligned_height}")
 
 # 使用 mss 截取屏幕，录制 10 秒
-with mss.mss() as sct:
+with mss.MSS() as sct:
     monitor_config = sct.monitors[1]
 
     start_time = time.time()
+    last_log_time = start_time
     frame_count = 0
 
     while time.time() - start_time < 10:  # 录制 10 秒
@@ -54,7 +55,13 @@ with mss.mss() as sct:
 
         recorder.write_frame(frame_data)
         frame_count += 1
-        print(f"  已写入第 {frame_count} 帧")
+
+        # 每秒打印一次进度
+        now = time.time()
+        if now - last_log_time >= 1.0:
+            elapsed = now - start_time
+            print(f"  已写入 {frame_count} 帧 ({elapsed:.1f}s)")
+            last_log_time = now
 
 # 结束录制
 recorder.stop()

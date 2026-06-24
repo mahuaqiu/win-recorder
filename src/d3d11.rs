@@ -197,25 +197,6 @@ impl D3D11TextureManager {
         }
     }
 
-    /// 上传 BGRA 帧数据到 GPU 纹理（原有兼容性方法）
-    ///
-    /// # 参数
-    /// - frame_data: BGRA 格式的帧数据（每像素 4 字节）
-    ///
-    /// # 说明
-    /// 此方法保持向后兼容，内部调用 upload_bgra_to_staging + copy_staging_to_gpu。
-    /// 如需在上传后绘制水印，请使用拆分后的方法：
-    /// ```ignore
-    /// manager.upload_bgra_to_staging(frame_data)?;
-    /// // 在 staging 纹理上绘制水印 ...
-    /// manager.copy_staging_to_gpu();
-    /// ```
-    pub fn upload_bgra(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
-        self.upload_bgra_to_staging(frame_data)?;
-        self.copy_staging_to_gpu();
-        Ok(())
-    }
-
     /// 创建 Media Foundation Sample（使用内存缓冲区）
     ///
     /// # 返回
