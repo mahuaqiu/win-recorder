@@ -7,9 +7,9 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 use crate::error::RecorderError;
 
 /// 字符宽度（像素）
-const CHAR_WIDTH: u32 = 16;
+const CHAR_WIDTH: u32 = 32;
 /// 字符高度（像素）
-const CHAR_HEIGHT: u32 = 32;
+const CHAR_HEIGHT: u32 = 64;
 /// 时间字符串字符数 (HH:MM:SS.mmm)
 const TIME_CHARS: u32 = 12;
 /// 水印边距（像素）
@@ -19,8 +19,8 @@ const BG_PADDING: u32 = 4;
 
 /// 水印渲染器
 pub struct WatermarkRenderer {
-    // 预渲染的字符点阵: 12个字符 (0-9, :, :), 每个字符 32 行，每行 2 字节 (16 像素宽)
-    char_bitmaps: [[u8; 64]; 12],
+    // 预渲染的字符点阵: 12个字符 (0-9, :, .), 每个字符 64 行，每行 4 字节 (32 像素宽)
+    char_bitmaps: [[u8; 256]; 12],
 }
 
 /// 字符索引映射
@@ -39,31 +39,36 @@ const CHAR_INDEX: [(char, usize); 12] = [
     ('.', 11),
 ];
 
-/// 将 8x16 点阵放大为 16x32 点阵
-/// 原始每行 1 字节 (8 像素)，放大后每行 2 字节 (16 像素)
-/// 放大策略：每个原始像素在水平和垂直方向各重复一次
-const fn scale_bitmap(small: [u8; 16]) -> [u8; 64] {
-    let mut result = [0u8; 64];
+/// 将 8x16 点阵放大为 32x64 点阵
+/// 原始每行 1 字节 (8 像素)，放大后每行 4 字节 (32 像素)
+/// 放大策略：每个原始像素在水平和垂直方向各重复 4 次 / 4 次
+const fn scale_bitmap(small: [u8; 16]) -> [u8; 256] {
+    let mut result = [0u8; 256];
     let mut src_row = 0usize;
     while src_row < 16 {
         let src_byte = small[src_row];
-        // 放大一行：每个 bit 展开为 2 bit
-        let hi = ((src_byte & 0x80) >> 7) * 0xC0
-            | ((src_byte & 0x40) >> 6) * 0x30
-            | ((src_byte & 0x20) >> 5) * 0x0C
-            | ((src_byte & 0x10) >> 4) * 0x03;
-        let lo = ((src_byte & 0x08) >> 3) * 0xC0
-            | ((src_byte & 0x04) >> 2) * 0x30
-            | ((src_byte & 0x02) >> 1) * 0x0C
-            | ((src_byte & 0x01) >> 0) * 0x03;
+        // 水平放大 4 倍：每个 bit 展开为 4 bit
+        // 将 8 bit 输入扩展为 32 bit (4 字节)，每个原始 bit 变成 4 bit
+        let b0 = ((src_byte & 0x80) >> 7) * 0xF0
+            | ((src_byte & 0x40) >> 6) * 0x0F;
+        let b1 = ((src_byte & 0x20) >> 5) * 0xF0
+            | ((src_byte & 0x10) >> 4) * 0x0F;
+        let b2 = ((src_byte & 0x08) >> 3) * 0xF0
+            | ((src_byte & 0x04) >> 2) * 0x0F;
+        let b3 = ((src_byte & 0x02) >> 1) * 0xF0
+            | ((src_byte & 0x01) >> 0) * 0x0F;
 
-        // 水平放大：每行重复一次写入两行
-        let dst_row0 = src_row * 2;
-        let dst_row1 = src_row * 2 + 1;
-        result[dst_row0 * 2] = hi;
-        result[dst_row0 * 2 + 1] = lo;
-        result[dst_row1 * 2] = hi;
-        result[dst_row1 * 2 + 1] = lo;
+        // 垂直放大 4 倍：每行重复 4 次写入
+        let dst_row0 = src_row * 4;
+        let mut dst_offset = 0usize;
+        while dst_offset < 4 {
+            let r = dst_row0 + dst_offset;
+            result[r * 4] = b0;
+            result[r * 4 + 1] = b1;
+            result[r * 4 + 2] = b2;
+            result[r * 4 + 3] = b3;
+            dst_offset += 1;
+        }
 
         src_row += 1;
     }
@@ -138,7 +143,7 @@ impl WatermarkRenderer {
             ],
         ];
 
-        // 将 8x16 基础点阵放大为 16x32
+        // 将 8x16 基础点阵放大为 32x64
         let char_bitmaps = [
             scale_bitmap(base_bitmaps[0]),
             scale_bitmap(base_bitmaps[1]),
@@ -176,7 +181,7 @@ impl WatermarkRenderer {
         }
     }
 
-    /// 绘制单个字符到 BGRA 缓冲区 (16x32 点阵)
+    /// 绘制单个字符到 BGRA 缓冲区 (32x64 点阵)
     fn draw_char(
         &self,
         buffer: *mut std::ffi::c_void,
@@ -191,11 +196,21 @@ impl WatermarkRenderer {
         if let Some(idx) = self.get_char_index(ch) {
             let bitmap = &self.char_bitmaps[idx];
             for row in 0..CHAR_HEIGHT {
-                // 每行 2 字节 (16 像素)
-                let src_hi = bitmap[(row * 2) as usize];
-                let src_lo = bitmap[(row * 2 + 1) as usize];
+                // 每行 4 字节 (32 像素)
+                let src_b0 = bitmap[(row * 4) as usize];
+                let src_b1 = bitmap[(row * 4 + 1) as usize];
+                let src_b2 = bitmap[(row * 4 + 2) as usize];
+                let src_b3 = bitmap[(row * 4 + 3) as usize];
                 for col in 0..CHAR_WIDTH {
-                    let src_byte = if col < 8 { src_hi } else { src_lo };
+                    let src_byte = if col < 8 {
+                        src_b0
+                    } else if col < 16 {
+                        src_b1
+                    } else if col < 24 {
+                        src_b2
+                    } else {
+                        src_b3
+                    };
                     let bit_pos = col % 8;
                     if src_byte & (0x80 >> bit_pos) != 0 {
                         let dst_x = x + col;
@@ -265,16 +280,16 @@ impl WatermarkRenderer {
         height: u32,
     ) -> Result<(), RecorderError> {
         // 计算水印所需最小尺寸
-        // 文字宽度: 12 字符 * 16px = 192px
-        // 背景框: 192 + 2 * 4(padding) = 200px
-        // 加上边距: 200 + 2 * 20(margin) = 240px (但左侧 margin 内就是文字)
-        // 实际: margin(20) + padding(4) + 192 + padding(4) + margin(20) = 240
-        // 最小宽度需要: margin + padding + 文字宽度 + padding = 20 + 4 + 192 + 4 = 220
-        let text_width = TIME_CHARS * CHAR_WIDTH; // 192px
-        let bg_width = text_width + 2 * BG_PADDING; // 200px
-        let bg_height = CHAR_HEIGHT + 2 * BG_PADDING; // 40px
-        let min_width = MARGIN + bg_width + BG_PADDING; // 左边距 + 背景 + 右余量 ≈ 224
-        let min_height = MARGIN + bg_height + BG_PADDING; // 下边距 + 背景 + 上余量 ≈ 64
+        // 文字宽度: 12 字符 * 32px = 384px
+        // 背景框: 384 + 2 * 4(padding) = 392px
+        // 加上边距: 392 + 2 * 20(margin) = 432px (但左侧 margin 内就是文字)
+        // 实际: margin(20) + padding(4) + 384 + padding(4) + margin(20) = 432
+        // 最小宽度需要: margin + padding + 文字宽度 + padding = 20 + 4 + 384 + 4 = 412
+        let text_width = TIME_CHARS * CHAR_WIDTH; // 384px
+        let bg_width = text_width + 2 * BG_PADDING; // 392px
+        let bg_height = CHAR_HEIGHT + 2 * BG_PADDING; // 72px
+        let min_width = MARGIN + bg_width + BG_PADDING; // 左边距 + 背景 + 右余量 ≈ 416
+        let min_height = MARGIN + bg_height + BG_PADDING; // 下边距 + 背景 + 上余量 ≈ 96
 
         if width < min_width || height < min_height {
             return Ok(()); // 跳过
