@@ -157,8 +157,8 @@ impl WatermarkRenderer {
         width: u32,
         height: u32,
     ) -> Result<(), RecorderError> {
-        // 检查最小分辨率
-        if width < 100 || height < 30 {
+        // 检查最小分辨率 (12字符 * 8px + 20px margin = 116px 宽)
+        if width < 116 || height < 36 {
             return Ok(()); // 跳过
         }
 
@@ -185,7 +185,7 @@ impl WatermarkRenderer {
             let char_width = 8u32;
             let char_height = 16u32;
             let start_x = margin;
-            let start_y = height - margin - char_height;
+            let start_y = height.saturating_sub(margin).saturating_sub(char_height);
 
             // 绘制每个字符
             for (i, ch) in time_str.chars().enumerate() {
