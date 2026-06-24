@@ -141,9 +141,8 @@ impl D3D11TextureManager {
     /// - frame_data: BGRA 格式的帧数据（每像素 4 字节）
     ///
     /// # 说明
-    /// 使用 Map/Unmap 将数据拷贝到 Staging 纹理。
-    /// 注意：使用 D3D11_MAP_READ_WRITE 映射，以便后续水印绘制
-    /// 可在同一 Map 周期内完成（先写入帧数据，再绘制水印，最后 Unmap）。
+    /// 仅上传数据到 staging 纹理（不拷贝到 GPU）
+    /// 注意：使用 D3D11_MAP_READ_WRITE 以便后续水印绘制可以单独 Map 此纹理
     pub fn upload_bgra_to_staging(&self, frame_data: &[u8]) -> Result<(), RecorderError> {
         unsafe {
             let expected_size = (self.width * self.height * 4) as usize;
