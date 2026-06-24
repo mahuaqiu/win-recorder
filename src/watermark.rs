@@ -6,10 +6,21 @@ use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::error::RecorderError;
 
+/// 字符宽度（像素）
+const CHAR_WIDTH: u32 = 16;
+/// 字符高度（像素）
+const CHAR_HEIGHT: u32 = 32;
+/// 时间字符串字符数 (HH:MM:SS.mmm)
+const TIME_CHARS: u32 = 12;
+/// 水印边距（像素）
+const MARGIN: u32 = 20;
+/// 背景框内边距（像素）
+const BG_PADDING: u32 = 4;
+
 /// 水印渲染器
 pub struct WatermarkRenderer {
-    // 预渲染的字符点阵: 12个字符 (0-9, :, .), 每个16行每行1字节
-    char_bitmaps: [[u8; 16]; 12],
+    // 预渲染的字符点阵: 12个字符 (0-9, :, :), 每个字符 32 行，每行 2 字节 (16 像素宽)
+    char_bitmaps: [[u8; 64]; 12],
 }
 
 /// 字符索引映射
@@ -28,12 +39,43 @@ const CHAR_INDEX: [(char, usize); 12] = [
     ('.', 11),
 ];
 
+/// 将 8x16 点阵放大为 16x32 点阵
+/// 原始每行 1 字节 (8 像素)，放大后每行 2 字节 (16 像素)
+/// 放大策略：每个原始像素在水平和垂直方向各重复一次
+const fn scale_bitmap(small: [u8; 16]) -> [u8; 64] {
+    let mut result = [0u8; 64];
+    let mut src_row = 0usize;
+    while src_row < 16 {
+        let src_byte = small[src_row];
+        // 放大一行：每个 bit 展开为 2 bit
+        let hi = ((src_byte & 0x80) >> 7) * 0xC0
+            | ((src_byte & 0x40) >> 6) * 0x30
+            | ((src_byte & 0x20) >> 5) * 0x0C
+            | ((src_byte & 0x10) >> 4) * 0x03;
+        let lo = ((src_byte & 0x08) >> 3) * 0xC0
+            | ((src_byte & 0x04) >> 2) * 0x30
+            | ((src_byte & 0x02) >> 1) * 0x0C
+            | ((src_byte & 0x01) >> 0) * 0x03;
+
+        // 水平放大：每行重复一次写入两行
+        let dst_row0 = src_row * 2;
+        let dst_row1 = src_row * 2 + 1;
+        result[dst_row0 * 2] = hi;
+        result[dst_row0 * 2 + 1] = lo;
+        result[dst_row1 * 2] = hi;
+        result[dst_row1 * 2 + 1] = lo;
+
+        src_row += 1;
+    }
+    result
+}
+
 impl WatermarkRenderer {
     /// 创建水印渲染器
     pub fn new() -> Self {
-        // 内置 8x16 点阵字体 (0-9, :, .)
+        // 内置 8x16 基础点阵字体 (0-9, :, .)
         // 格式: 每行 1 字节 (8 像素)，共 16 行
-        let char_bitmaps = [
+        let base_bitmaps: [[u8; 16]; 12] = [
             // 0: 8x16 点阵
             [
                 0x00, 0x00, 0x3C, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x66,
@@ -96,6 +138,22 @@ impl WatermarkRenderer {
             ],
         ];
 
+        // 将 8x16 基础点阵放大为 16x32
+        let char_bitmaps = [
+            scale_bitmap(base_bitmaps[0]),
+            scale_bitmap(base_bitmaps[1]),
+            scale_bitmap(base_bitmaps[2]),
+            scale_bitmap(base_bitmaps[3]),
+            scale_bitmap(base_bitmaps[4]),
+            scale_bitmap(base_bitmaps[5]),
+            scale_bitmap(base_bitmaps[6]),
+            scale_bitmap(base_bitmaps[7]),
+            scale_bitmap(base_bitmaps[8]),
+            scale_bitmap(base_bitmaps[9]),
+            scale_bitmap(base_bitmaps[10]),
+            scale_bitmap(base_bitmaps[11]),
+        ];
+
         Self { char_bitmaps }
     }
 
@@ -118,7 +176,7 @@ impl WatermarkRenderer {
         }
     }
 
-    /// 绘制单个字符到 BGRA 缓冲区
+    /// 绘制单个字符到 BGRA 缓冲区 (16x32 点阵)
     fn draw_char(
         &self,
         buffer: *mut std::ffi::c_void,
@@ -126,24 +184,73 @@ impl WatermarkRenderer {
         x: u32,
         y: u32,
         ch: char,
+        width: u32,
+        height: u32,
     ) {
-        let buffer = buffer as *mut u8; // 类型转换
+        let buffer = buffer as *mut u8;
         if let Some(idx) = self.get_char_index(ch) {
             let bitmap = &self.char_bitmaps[idx];
-            for row in 0..16u32 {
-                let src_byte = bitmap[row as usize];
-                // 逐像素绘制 (高位在左)
-                for col in 0..8u32 {
-                    if src_byte & (0x80 >> col) != 0 {
-                        // 绘制白色像素 (BGRA: 255, 255, 255, 255)
-                        let dst_offset = (y + row) as usize * row_pitch + (x + col) as usize * 4;
-                        unsafe {
-                            *buffer.add(dst_offset) = 255; // B
-                            *buffer.add(dst_offset + 1) = 255; // G
-                            *buffer.add(dst_offset + 2) = 255; // R
-                            *buffer.add(dst_offset + 3) = 255; // A
+            for row in 0..CHAR_HEIGHT {
+                // 每行 2 字节 (16 像素)
+                let src_hi = bitmap[(row * 2) as usize];
+                let src_lo = bitmap[(row * 2 + 1) as usize];
+                for col in 0..CHAR_WIDTH {
+                    let src_byte = if col < 8 { src_hi } else { src_lo };
+                    let bit_pos = col % 8;
+                    if src_byte & (0x80 >> bit_pos) != 0 {
+                        let dst_x = x + col;
+                        let dst_y = y + row;
+                        if dst_x < width && dst_y < height {
+                            let dst_offset = dst_y as usize * row_pitch + dst_x as usize * 4;
+                            unsafe {
+                                *buffer.add(dst_offset) = 255; // B
+                                *buffer.add(dst_offset + 1) = 255; // G
+                                *buffer.add(dst_offset + 2) = 255; // R
+                                *buffer.add(dst_offset + 3) = 255; // A
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// 绘制半透明背景框
+    /// 背景色: 黑色半透明 (B=0, G=0, R=0, A=128)
+    fn draw_background(
+        buffer: *mut std::ffi::c_void,
+        row_pitch: usize,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        frame_width: u32,
+        frame_height: u32,
+    ) {
+        let buffer = buffer as *mut u8;
+        for row in 0..h {
+            let dst_y = y + row;
+            if dst_y >= frame_height {
+                break;
+            }
+            for col in 0..w {
+                let dst_x = x + col;
+                if dst_x >= frame_width {
+                    break;
+                }
+                let dst_offset = dst_y as usize * row_pitch + dst_x as usize * 4;
+                unsafe {
+                    // Alpha 混合: 背景为黑色半透明 (0,0,0,128)
+                    // 结果 = src * alpha + dst * (1 - alpha)
+                    // 简化: 因为背景色为黑色 (0,0,0)，结果 = dst * (128/255) ≈ dst / 2
+                    let b = *buffer.add(dst_offset);
+                    let g = *buffer.add(dst_offset + 1);
+                    let r = *buffer.add(dst_offset + 2);
+                    let a = *buffer.add(dst_offset + 3);
+                    *buffer.add(dst_offset) = b >> 1; // B: 原值 * 128/255 ≈ 原值/2
+                    *buffer.add(dst_offset + 1) = g >> 1; // G
+                    *buffer.add(dst_offset + 2) = r >> 1; // R
+                    *buffer.add(dst_offset + 3) = a; // 保持原始 alpha
                 }
             }
         }
@@ -157,8 +264,19 @@ impl WatermarkRenderer {
         width: u32,
         height: u32,
     ) -> Result<(), RecorderError> {
-        // 检查最小分辨率 (12字符 * 8px + 20px margin = 116px 宽)
-        if width < 116 || height < 36 {
+        // 计算水印所需最小尺寸
+        // 文字宽度: 12 字符 * 16px = 192px
+        // 背景框: 192 + 2 * 4(padding) = 200px
+        // 加上边距: 200 + 2 * 20(margin) = 240px (但左侧 margin 内就是文字)
+        // 实际: margin(20) + padding(4) + 192 + padding(4) + margin(20) = 240
+        // 最小宽度需要: margin + padding + 文字宽度 + padding = 20 + 4 + 192 + 4 = 220
+        let text_width = TIME_CHARS * CHAR_WIDTH; // 192px
+        let bg_width = text_width + 2 * BG_PADDING; // 200px
+        let bg_height = CHAR_HEIGHT + 2 * BG_PADDING; // 40px
+        let min_width = MARGIN + bg_width + BG_PADDING; // 左边距 + 背景 + 右余量 ≈ 224
+        let min_height = MARGIN + bg_height + BG_PADDING; // 下边距 + 背景 + 上余量 ≈ 64
+
+        if width < min_width || height < min_height {
             return Ok(()); // 跳过
         }
 
@@ -180,21 +298,37 @@ impl WatermarkRenderer {
             // 获取时间字符串
             let time_str = Self::get_time_string();
 
-            // 计算水印位置 (左下角，距边缘 20px)
-            let margin = 20u32;
-            let char_width = 8u32;
-            let char_height = 16u32;
-            let start_x = margin;
-            let start_y = height.saturating_sub(margin).saturating_sub(char_height);
+            // 计算水印位置 (左下角)
+            // 背景框位置
+            let bg_x = MARGIN;
+            let bg_y = height.saturating_sub(MARGIN).saturating_sub(bg_height);
+
+            // 先绘制半透明背景框
+            Self::draw_background(
+                mapped.pData,
+                mapped.RowPitch as usize,
+                bg_x,
+                bg_y,
+                bg_width,
+                bg_height,
+                width,
+                height,
+            );
+
+            // 文字起始位置（背景框内部，加 padding）
+            let start_x = bg_x + BG_PADDING;
+            let start_y = bg_y + BG_PADDING;
 
             // 绘制每个字符
             for (i, ch) in time_str.chars().enumerate() {
                 self.draw_char(
                     mapped.pData,
                     mapped.RowPitch as usize,
-                    start_x + i as u32 * char_width,
+                    start_x + i as u32 * CHAR_WIDTH,
                     start_y,
                     ch,
+                    width,
+                    height,
                 );
             }
 
