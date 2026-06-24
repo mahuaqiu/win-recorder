@@ -556,6 +556,26 @@ impl H264Encoder {
             .SetUINT32(&MF_MT_DEFAULT_STRIDE, stride)
             .map_err(|e| RecorderError::MFError(format!("设置 NV12 stride 失败: {}", e)))?;
 
+        // 注意：H.264 编码器 MFT 的输出只支持 limited range (16-235)，
+        // 设置 full range 会导致 "Input and output nominal range mismatch" 错误。
+        // 因此这里不再设置 MF_MT_VIDEO_NOMINAL_RANGE，让编码器使用默认的 limited range。
+        // 浏览器按 limited range 解码，画面会略显发灰，但至少能正常工作。
+
+        // BT.601 矩阵：保持 YUV 转换色彩一致性
+        media_type
+            .SetUINT32(&MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT601.0 as u32)
+            .map_err(|e| RecorderError::MFError(format!("设置 YUV 矩阵失败: {}", e)))?;
+
+        // 色彩原色 / 传输函数：SDR sRGB 近似，对应 BT.709 原色 + BT.601 矩阵的常见组合。
+        // 这三项确保浏览器正确还原色彩空间。
+        media_type
+            .SetUINT32(&MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709.0 as u32)
+            .map_err(|e| RecorderError::MFError(format!("设置色彩原色失败: {}", e)))?;
+
+        media_type
+            .SetUINT32(&MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709.0 as u32)
+            .map_err(|e| RecorderError::MFError(format!("设置传输函数失败: {}", e)))?;
+
         Ok(media_type)
     }
 

@@ -33,8 +33,13 @@ pub fn bgra_to_nv12(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
             let g = bgra_data[bgra_idx + 1] as u32;
             let r = bgra_data[bgra_idx + 2] as u32;
             
-            // BT.601 亮度公式的简化整数版本
-            let y_val = ((r * 306 + g * 601 + b * 117) >> 10) as u8;
+            // BT.601 亮度公式（full range）
+            // Y_full = 0.299*R + 0.587*G + 0.114*B
+            // 简化版本: Y_full = (306*R + 601*G + 117*B) >> 10 → 0-255
+            // 编码器期望 limited range (16-235)，需要映射：
+            // Y_limited = Y_full * 219/255 + 16 ≈ Y_full * 219/256 + 16
+            let y_full = (r * 306 + g * 601 + b * 117) >> 10;
+            let y_val = ((((y_full as u32) * 219) >> 8) + 16) as u8;
             
             let y_idx = y * width + x;
             nv12[y_idx] = y_val;
@@ -61,9 +66,15 @@ pub fn bgra_to_nv12(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
             let b = ((bgra_data[bgra_idx00 + 2] as u32 + bgra_data[bgra_idx01 + 2] as u32 
                    + bgra_data[bgra_idx10 + 2] as u32 + bgra_data[bgra_idx11 + 2] as u32) / 4) as i32;
 
-            // BT.601 色度公式
-            let u_val = (((-r * -147 - g * 289 + b * 436) >> 10) + 128) as u8;
-            let v_val = (((r * 615 - g * 515 - b * 100) >> 10) + 128) as u8;
+            // BT.601 色度公式（full range）
+            // U = -0.147*R - 0.289*G + 0.436*B
+            // V =  0.615*R - 0.515*G - 0.100*B
+            // 修复：原 U 公式写成 -r * -147（负负得正），与标准符号相反，导致颜色偏色。
+            let u_val = ((-r * 147 - g * 289 + b * 436) >> 10) + 128;
+            let v_val = ((r * 615 - g * 515 - b * 100) >> 10) + 128;
+            // 钳位到 [0, 255]，防止越界
+            let u_val = u_val.clamp(0, 255) as u8;
+            let v_val = v_val.clamp(0, 255) as u8;
 
             let uv_idx = y_size + (y * width / 2 + x) * 2;
             nv12[uv_idx] = u_val;         // U
@@ -97,15 +108,17 @@ pub fn bgra_to_iyuv(bgra_data: &[u8], width: u32, height: u32) -> Vec<u8> {
     let height = height as usize;
 
     // 1. 转换 Y 平面
+    // BT.601 亮度公式 → limited range (16-235)
     for y in 0..height {
         for x in 0..width {
             let bgra_idx = (y * width + x) * 4;
             let b = bgra_data[bgra_idx] as u32;
             let g = bgra_data[bgra_idx + 1] as u32;
             let r = bgra_data[bgra_idx + 2] as u32;
-            
-            let y_val = ((r * 306 + g * 601 + b * 117) >> 10) as u8;
-            
+
+            let y_full = (r * 306 + g * 601 + b * 117) >> 10;
+            let y_val = ((((y_full as u32) * 219) >> 8) + 16) as u8;
+
             let y_idx = y * width + x;
             iyuv[y_idx] = y_val;
         }
