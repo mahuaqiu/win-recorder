@@ -31,7 +31,7 @@ aligned_height = recorder.height
 print(f"对齐后分辨率: {aligned_width} x {aligned_height}")
 
 # 使用 mss 截取屏幕，录制 10 秒
-with mss.MSS() as sct:
+with mss.mss() as sct:
     monitor_config = sct.monitors[1]
 
     start_time = time.time()
