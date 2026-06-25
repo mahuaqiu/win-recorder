@@ -139,7 +139,7 @@ impl WinRecorder {
         // 如果开启水印，绘制水印到 staging 纹理
         // 水印绘制失败不中断录制，只记录警告
         if self.watermark {
-            if let Some(renderer) = &self.watermark_renderer {
+            if let Some(renderer) = &mut self.watermark_renderer {
                 if let Err(e) = renderer.render(
                     texture_manager.context(),
                     texture_manager.staging_texture(),
